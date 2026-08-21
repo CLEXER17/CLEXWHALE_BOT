@@ -1,0 +1,28 @@
+# Railway service configuration.
+#
+# One service runs the whole bot. Do not split the ingestion pipeline into a
+# second service: the Hyperliquid websocket limits are per IP, and two replicas
+# would compete for the same 10-unique-address budget while double-sending every
+# alert.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Migrations run inside app.main before anything else touches the schema, so the
+# start command is the whole deployment procedure. Nothing has to be started by
+# hand and nothing needs an SSH session.
+startCommand = "python -m app.main"
+
+# /health returns 200 for "healthy" and for "degraded" (bot up, Hyperliquid
+# reconnecting), and 503 only when the database is unreachable.
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# One instance. Alerts are deduplicated per process, so a second replica would
+# deliver every whale event twice.
+numReplicas = 1
