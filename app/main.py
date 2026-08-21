@@ -36,7 +36,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from app.bot.application import build_application
+from app.bot.application import build_application, post_init
 from app.config import ConfigError, Settings, get_settings, validate_runtime
 from app.container import AppContainer
 from app.database.base import set_database
@@ -163,6 +163,10 @@ class Runtime:
 
         # 6. Telegram
         await self.telegram.initialize()
+        # PTB runs ``post_init`` only from ``run_polling``/``run_webhook``; this
+        # process owns the lifecycle, so it has to run it. Identity is available
+        # now because ``initialize()`` has already called ``getMe``.
+        await post_init(self.telegram)
         await container.alerts.start()
         await self.telegram.start()
         if self.telegram.updater is not None:

@@ -57,23 +57,39 @@ def build_application(container: AppContainer) -> Application:
         .write_timeout(_WRITE_TIMEOUT)
         .pool_timeout(_POOL_TIMEOUT)
         .get_updates_read_timeout(_READ_TIMEOUT)
-        .post_init(_post_init)
+        .post_init(post_init)
         .build()
     )
 
     application.bot_data["app"] = container
+    # Attach the bot here, not in ``post_init``. ``application.bot`` exists the
+    # moment the builder returns, and deferring it was a production bug: PTB
+    # calls ``post_init`` only from ``run_polling``/``run_webhook``, while this
+    # process drives the lifecycle step by step (``app.main.Runtime.start``). The
+    # alert service was therefore left with ``bot is None`` and every whale alert
+    # was discarded with "Telegram bot not attached yet".
+    container.alerts.attach_bot(application.bot)
     register_handlers(application)
     return application
 
 
-async def _post_init(application: Application) -> None:
-    """Runs after the bot's own identity has been fetched.
+async def post_init(application: Application) -> None:
+    """Work that needs the bot's own identity — run after ``initialize()``.
 
-    Two jobs: give the alert service a bot to send with, and publish the command
-    menu. Both are safe to retry, and a failure to publish the menu is cosmetic —
-    it must not stop the deploy.
+    PTB invokes this itself only from ``run_polling``/``run_webhook``, so
+    :class:`app.main.Runtime` calls it explicitly. The builder registration is
+    kept so the function still runs if anyone switches to ``run_polling``, and
+    the guard below makes the resulting double call harmless.
+
+    Publishing the command menu is cosmetic: a failure is logged, never fatal.
     """
+    if application.bot_data.get("_post_init_done"):
+        return
+    application.bot_data["_post_init_done"] = True
+
     container: AppContainer = application.bot_data["app"]
+    # Idempotent, and already done in ``build_application``; repeated so this
+    # function remains correct on its own if it is ever the only caller.
     container.alerts.attach_bot(application.bot)
 
     me = application.bot
@@ -88,4 +104,4 @@ async def _post_init(application: Application) -> None:
         log.warning("Could not publish the command menu", extra={"error": str(exc)})
 
 
-__all__ = ["build_application"]
+__all__ = ["build_application", "post_init"]
