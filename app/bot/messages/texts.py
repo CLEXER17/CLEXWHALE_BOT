@@ -58,6 +58,23 @@ PROMPT_WALLET = "Send the wallet address to watch (0x…)."
 CANCELLED = "✖️ Cancelled."
 
 
+# ── alert subscription (/stop, /start) ─────────────────────────
+def alerts_stopped() -> str:
+    return "\n".join(
+        [
+            "🔇 <b>Alerts stopped.</b>",
+            "",
+            "You will not receive any further whale signals in this chat.",
+            "Send /start when you want them back — the setting is stored, so it",
+            "survives restarts and redeployments.",
+        ]
+    )
+
+
+def alerts_resumed() -> str:
+    return "🔔 <b>Alerts resumed.</b> You will receive whale signals again."
+
+
 def start_admin(role_label: str, config: RuntimeConfig) -> str:
     return "\n".join(
         [
@@ -121,7 +138,8 @@ def help_text(*, admin: bool, main_admin: bool) -> str:
         "📖 <b>COMMANDS</b>",
         DIVIDER,
         "<b>General</b>",
-        "/start — open the menu",
+        "/start — open the menu (and resume alerts after /stop)",
+        "/stop — stop receiving alerts until you send /start",
         "/help — this list",
         "/status — monitoring status",
         "",

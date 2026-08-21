@@ -14,6 +14,7 @@ from app.bot.middleware.permissions import (
     requires,
     respond,
 )
+from app.container import AppContainer
 from app.services.admin_service import Actor, Capability
 from app.utils.logging import get_logger
 
@@ -27,12 +28,46 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     able to tell a stranger it is private. Contact details are recorded so that
     flipping public mode on later can reach people who already tried, but no
     whale data is disclosed.
+
+    ``/start`` is also the way back from ``/stop``: it clears the opt-out, which
+    is why it re-subscribes explicitly instead of relying on registration.
     """
     container = get_container(context)
     await register(update, container)
+    resumed = await _set_alerts(update, container, True)
     actor = actor_of(update, container)
+    if resumed:
+        await respond(update, texts.alerts_resumed(), edit=False)
     text, keyboard = await views.start_view(container, actor)
     await respond(update, text, keyboard, edit=False)
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/stop`` — deliver nothing to this chat until ``/start`` arrives.
+
+    Available to everyone, administrators included, and never refused: being
+    asked to stop messaging someone is not a privileged operation. The opt-out is
+    stored in PostgreSQL, so it survives a redeploy.
+    """
+    container = get_container(context)
+    await _set_alerts(update, container, False)
+    await respond(update, texts.alerts_stopped(), edit=False)
+
+
+async def _set_alerts(update: Update, container: AppContainer, value: bool) -> bool:
+    """Persist the opt-in state. Returns True when it actually changed."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or chat is None:
+        return False
+    try:
+        was_subscribed = await container.admins.is_subscribed(user.id)
+        await container.admins.set_subscription(user.id, chat.id, value)
+    except Exception:
+        log.exception("Could not change alert subscription", extra={"telegram_id": user.id})
+        return False
+    container.alerts.invalidate_recipients()
+    return was_subscribed != value
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

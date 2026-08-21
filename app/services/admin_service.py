@@ -321,6 +321,26 @@ class AdminService:
         except Exception:
             log.exception("Could not register user", extra={"telegram_id": telegram_id})
 
+    async def set_subscription(self, telegram_id: int, chat_id: int, value: bool) -> None:
+        """``/stop`` and ``/start`` — opt out of, or back into, alert delivery.
+
+        The row is upserted first so an administrator who has never sent a
+        message still gets a persisted opt-out; without it ``/stop`` would be
+        forgotten the moment the process restarted.
+        """
+        async with self.db.session() as session:
+            await UserRepository.upsert(session, telegram_id=telegram_id, chat_id=chat_id)
+            await session.flush()
+            await UserRepository.set_subscribed(session, telegram_id, value)
+
+    async def is_subscribed(self, telegram_id: int) -> bool:
+        """False only for an explicit opt-out; an unknown user is subscribed."""
+        async with self.db.session() as session:
+            row = await UserRepository.get(session, telegram_id)
+        if row is None:
+            return True
+        return bool(row.is_subscribed) and not bool(row.is_blocked)
+
     def stats(self) -> dict[str, object]:
         return {
             "main_admin_configured": bool(self.main_admin_id),

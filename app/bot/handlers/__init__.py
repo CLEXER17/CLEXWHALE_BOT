@@ -20,6 +20,7 @@ from app.bot.handlers import admin, callbacks, common, data, prompts
 #: ``(command, handler)`` — the order only matters for readability.
 COMMANDS = (
     ("start", common.cmd_start),
+    ("stop", common.cmd_stop),
     ("help", common.cmd_help),
     ("about", common.cmd_about),
     ("panel", common.cmd_panel),
@@ -60,6 +61,7 @@ COMMANDS = (
 #: refused anyway.
 PUBLIC_COMMAND_MENU = (
     BotCommand("start", "Open the whale monitor"),
+    BotCommand("stop", "Stop receiving alerts"),
     BotCommand("help", "List the available commands"),
     BotCommand("status", "Monitoring status"),
     BotCommand("whales", "Recent whale events"),
