@@ -5,17 +5,18 @@ this file plus the repository alone. Read `.agent/NOW.md` first — it is smalle
 
 ## Current Objective
 
-Finish Phase 14 (documentation) and Phase 15 (pre-deployment verification), then
-**stop** with a deployment-readiness report. Do not push. Do not deploy.
+Deployment. GitHub is done; Railway is the user's step.
 
 ## Current Phase
 
-Phase 14–15 of 15. Phases 1–13 are implemented, tested and green:
+Phase 15 of 15. Everything is implemented, tested (379 passed, 0 failed,
+0 skipped), documented, committed and **pushed** to
+<https://github.com/CLEXER17/CLEXWHALE_BOT> (`main` tracks `origin/main`):
 foundation, config, database + migrations, Hyperliquid REST/WS clients, whale
 pipeline (parser → tracker → detector → filter → dedup), services
 (settings, admin/permissions, alerts), Telegram surface, entry point,
 deployment surface (Dockerfile / railway.toml / start.sh), project memory,
-and the full §36 test suite.
+and the full §36 test suite. **Railway deployment has not been performed.**
 
 ## What Was Just Completed
 
@@ -47,29 +48,35 @@ and the full §36 test suite.
 
 ## What Is Half-Finished
 
-Nothing in code. Remaining work is bookkeeping:
+Nothing in code, nothing in documentation, nothing in version control. Seven
+commits are on `origin/main`:
 
-1. Refresh `TASK_QUEUE.md` (Task 014 subtasks are still unchecked) and
-   `FILE_INDEX.md` (its project-memory line lists 7 of the 11 `.agent` files and
-   does not mention `tests/`).
-2. Five/six logical commits, in this order, with `git status` + `git diff` before
-   each and `git log --oneline -10` after:
-   `test: add unit coverage …` (fixtures, factories, config, detectors, filters,
-   dedup, permissions, handlers — these were never committed, so they need their
-   own commit ahead of the three prescribed test commits) →
-   `test: add database persistence coverage` →
-   `test: add resilience coverage` →
-   `test: add end-to-end engine pipeline coverage` →
-   `docs: add Hyperliquid API notes and test status` →
-   `docs: add production README`.
-   The engine `_write_lock` fix belongs with the pipeline test that found it.
-   `railway.toml` and `scripts/` are already tracked (committed in `c054e0c`);
-   nothing there needs adding.
-3. Deployment-readiness report, then stop.
+```
+test: add fixtures and unit coverage for config, detection and permissions
+test: add database persistence coverage
+test: add resilience coverage
+test: add end-to-end engine pipeline coverage   (+ the _write_lock fix)
+docs: add Hyperliquid API notes and test status
+docs: add production README
+docs: record the GitHub remote
+```
+
+The only remaining item is **Railway**, which this repository cannot do for the
+user:
+
+1. *New Project → Deploy from GitHub repo →* `CLEXER17/CLEXWHALE_BOT`
+2. *New → Database → PostgreSQL*
+3. On the bot service, set `DATABASE_URL` as a reference to
+   `${{Postgres.DATABASE_URL}}` — never a literal connection string
+4. Set `BOT_TOKEN` and `MAIN_ADMIN_ID`
+5. Deploy; migrations run on boot; watch `/health`; `/start` in Telegram
+
+Never paste a token or a connection string into this repository, a commit
+message, or any `.agent/` file.
 
 ## Exact Files Being Worked On
 
-`.agent/TASK_QUEUE.md`, `.agent/FILE_INDEX.md`, `.agent/NOW.md` — then git.
+None. The working tree is clean and matches `origin/main`.
 
 ## Exact Function/Class Being Worked On
 
@@ -81,7 +88,9 @@ None.
 
 ## Last Command Run
 
-`./.venv/Scripts/python.exe -m pytest -q`
+`git push -u origin main` → `* [new branch] main -> main`, tracking set.
+
+Before that: `./.venv/Scripts/python.exe -m pytest -q`.
 
 Note: the bare `python` on PATH is **not** the project interpreter and lacks
 `pytest_asyncio`. Always use `./.venv/Scripts/python.exe`.
@@ -92,7 +101,12 @@ Note: the bare `python` on PATH is **not** the project interpreter and lacks
 
 ## Next Exact Action
 
-Update `TASK_QUEUE.md` and `FILE_INDEX.md`, then make the five commits above.
+Railway, by the user — the five steps above. Nothing in this repository is
+waiting on an edit.
+
+After the first live deploy, the one useful follow-up is to compare real
+Hyperliquid payload shapes against `.agent/API_NOTES.md` and correct that file if
+anything differs. Do not pre-emptively "fix" it from memory.
 
 ## Do NOT Redo
 
@@ -104,8 +118,11 @@ Update `TASK_QUEUE.md` and `FILE_INDEX.md`, then make the five commits above.
 - Do not commit `_boot.db`, `render_preview.txt`, `.pytest_cache/`, `.venv/` or
   `.env`. `.gitignore` already excludes all of them (`*.db` catches `_boot.db`,
   and `render_preview.txt` is named explicitly).
-- **Do not push to GitHub and do not deploy to Railway.** No remote exists and
-  none may be invented.
+- **Do not re-push history.** `origin/main` already has all seven commits;
+  `git push` for new work only, never `--force`.
+- **Do not attempt the Railway deployment.** It requires the user's own account
+  and their own `BOT_TOKEN` / `MAIN_ADMIN_ID`. Never invent, guess or embed a
+  credential to get past that.
 
 ## Important Technical Context
 

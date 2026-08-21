@@ -19,10 +19,14 @@ the code exists **and** has been exercised (run, migrated, or tested).
 [✓] 013 — Entry point: migrations on boot, /health, graceful shutdown
 [✓] 014 — Test suite (unit + integration, spec §36) — 379 passed, 0 failed
 [✓] 015 — README + API notes + test status (spec §51/§52)
-[ ] 016 — Production checklist pass (spec §54)            ← IN PROGRESS
-[ ] 017 — Push to GitHub and deploy on Railway            ← BLOCKED: user must
-                                                            supply the remote.
-                                                            Do not invent one.
+[✓] 016 — Production checklist pass (spec §54)
+[~] 017 — Push to GitHub and deploy on Railway
+         [✓] GitHub: origin = https://github.com/CLEXER17/CLEXWHALE_BOT
+             main -> origin/main, 7 commits. The remote was verified empty
+             before the first push, so nothing was overwritten.
+         [ ] Railway: needs the user's account, a PostgreSQL add-on, and
+             BOT_TOKEN / MAIN_ADMIN_ID set as Railway variables. No credential
+             lives in this repository and none may be added to it.
 ```
 
 ## 014 breakdown — complete
@@ -59,14 +63,18 @@ alerts. Recorded in `TEST_STATUS.md` and `DECISIONS.md`.
                                  GitHub, Railway, Hyperliquid limitations
 ```
 
-## 016 breakdown (current)
+## 016 breakdown — complete
 
 ```
 [✓] complete suite green (379 passed, 0 failed, 0 skipped)
-[✓] no secrets in the repository or in .agent/
+[✓] compileall clean; `import app.main` ok
+[✓] alembic upgrade head → downgrade base → upgrade head, single head
+[✓] missing production vars raise one aggregated ConfigError (proven by running)
+[✓] no secrets in the repository or in .agent/; no .env tracked
 [✓] no duplicate implementations under app/
-[ ] five logical commits (tests ×3, docs ×2)
-[ ] deployment-readiness report, then STOP
+[✓] railway.toml + pyproject.toml parse; Dockerfile installs curl for HEALTHCHECK
+[✓] seven logical commits (tests ×4, docs ×3)
+[✓] deployment-readiness report delivered
 ```
 
 ## Deferred / explicitly out of scope

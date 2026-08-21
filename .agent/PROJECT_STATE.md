@@ -9,12 +9,15 @@ Read this file first. The repository is the source of truth; this file records
 
 ## CURRENT PHASE
 
-**PHASE 15 — PRE-DEPLOYMENT VERIFICATION** (spec §54)
+**PHASE 15 — DEPLOYMENT** (spec §54/§55)
 
 Phases 1–14 are implemented and verified, including the full §36 test suite
-(**379 passed, 0 failed, 0 skipped**) and all documentation. What remains is the
-final commit sequence and a deployment-readiness report. **Nothing is pushed and
-nothing is deployed**; no Git remote exists and none may be invented.
+(**379 passed, 0 failed, 0 skipped**) and all documentation. The repository is
+published at **<https://github.com/CLEXER17/CLEXWHALE_BOT>** and `main` tracks
+`origin/main`. **Railway deployment has not been performed** — it needs the
+user's Railway account, a PostgreSQL add-on, and `BOT_TOKEN` / `MAIN_ADMIN_ID`
+set as Railway variables. No credential exists in this repository and none may
+be added to it.
 
 ---
 
@@ -50,14 +53,15 @@ nothing is deployed**; no Git remote exists and none may be invented.
 
 ## CURRENTLY WORKING ON
 
-- Final commit sequence (three `test:` commits, two `docs:` commits) and the
-  deployment-readiness report
+- Nothing. Awaiting the Railway deployment, which only the user can perform.
 
 ## NEXT TASK
 
-1. Commit in logical order; do not squash unrelated changes
-2. Produce the deployment-readiness report and **stop**
-3. Deployment itself is blocked until the user supplies their own GitHub remote
+1. Railway: *Deploy from GitHub repo* → `CLEXER17/CLEXWHALE_BOT` → add
+   PostgreSQL → reference `${{Postgres.DATABASE_URL}}` → set `BOT_TOKEN` and
+   `MAIN_ADMIN_ID` → deploy → watch `/health` → `/start` in Telegram
+2. After the first live run, record real observations in `API_NOTES.md` if any
+   payload shape differs from what is documented there
 
 ---
 
@@ -130,4 +134,6 @@ Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
 - Alembic migration: verified manually (`upgrade head` → `downgrade base` →
   `upgrade head`). The suite runs on SQLite and does not execute the migration
   scripts.
-- Railway deployment: not yet performed — pending the user's own GitHub remote.
+- Railway deployment: not yet performed. The GitHub remote now exists
+  (`CLEXER17/CLEXWHALE_BOT`); what is still missing is the user's Railway
+  project, its PostgreSQL add-on, and `BOT_TOKEN` / `MAIN_ADMIN_ID` set there.

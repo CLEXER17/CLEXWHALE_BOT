@@ -209,8 +209,11 @@ Design rules that are enforced by code, not convention:
 Requires **Python 3.13**.
 
 ```bash
-git clone <your-repository-url>
-cd "TG BOT"
+git clone https://github.com/CLEXER17/CLEXWHALE_BOT.git
+```
+
+```bash
+cd CLEXWHALE_BOT
 ```
 
 ```bash
@@ -370,33 +373,25 @@ public read endpoint. The bot never signs a transaction and never trades.
 
 ## Pushing to GitHub
 
-This repository has no remote configured, and this README will not invent one.
-Create an empty repository on GitHub yourself, then use **its** URL below in
-place of `<your-repository-url>`.
-
-If you are starting from a fresh copy:
+This repository lives at
+**<https://github.com/CLEXER17/CLEXWHALE_BOT>** and `main` already tracks it.
+Day to day, that means:
 
 ```bash
-git init
+git push
 ```
 
-```bash
-git add .
-```
+If you are setting up a fresh clone or a new remote instead:
 
 ```bash
-git commit -m "Initial commit"
-```
-
-```bash
-git remote add origin <your-repository-url>
+git remote add origin https://github.com/CLEXER17/CLEXWHALE_BOT.git
 ```
 
 ```bash
 git push -u origin main
 ```
 
-Before the first push, confirm nothing sensitive is staged:
+Before every push, confirm nothing sensitive is staged:
 
 ```bash
 git status --short
@@ -417,10 +412,12 @@ Hyperliquid websocket limits are *per IP*, so multiple instances would compete
 for the same 10 user-subscription slots and the same REST weight budget.
 `railway.toml` pins `numReplicas = 1` for the same reason.
 
-1. **Push the repository to GitHub** (previous section).
+1. **Push the repository to GitHub** — already done:
+   <https://github.com/CLEXER17/CLEXWHALE_BOT>.
 2. **Create the project.** In Railway: *New Project → Deploy from GitHub repo →*
-   select your repository. Railway detects [`Dockerfile`](Dockerfile) via
-   [`railway.toml`](railway.toml) (`builder = "DOCKERFILE"`).
+   select `CLEXER17/CLEXWHALE_BOT`. Railway detects
+   [`Dockerfile`](Dockerfile) via [`railway.toml`](railway.toml)
+   (`builder = "DOCKERFILE"`).
 3. **Provision PostgreSQL.** In the same project: *New → Database → Add
    PostgreSQL*.
 4. **Attach the database.** On the bot service, add a variable reference so

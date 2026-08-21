@@ -4,6 +4,19 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-21 — Published to GitHub
+
+- Remote connected and `main` pushed:
+  <https://github.com/CLEXER17/CLEXWHALE_BOT>. The remote was verified empty
+  (`git ls-remote` returned no refs) before the first push, so nothing was
+  overwritten, and a pre-push check confirmed no `.env` and no key material is
+  tracked — only `.env.example`, with every value blank.
+- `README.md` now names the real clone URL and the real Railway source repo
+  instead of a placeholder.
+- Railway deployment is **not** done: it needs the user's account, a PostgreSQL
+  add-on, and `BOT_TOKEN` / `MAIN_ADMIN_ID` as Railway variables. No credential
+  is in the repository and none may be added.
+
 ## 2026-08-21 — Documentation for release
 
 - `README.md`: features, command table, permission matrix, local installation,
