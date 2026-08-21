@@ -7,12 +7,13 @@ fall back to a fake default. Spec §32: secrets never reach logs or Telegram.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
 
 from app.config import REQUIRED_PRODUCTION_VARS, ConfigError, Settings, validate_runtime
-from app.utils.logging import REDACTOR, SecretRedactor
+from app.utils.logging import REDACTOR, JsonFormatter, PlainFormatter, SecretRedactor
 from tests.conftest import FAKE_BOT_TOKEN, MAIN_ADMIN_ID, make_settings
 
 
@@ -224,3 +225,89 @@ def test_redactor_never_raises():
 
 def test_the_global_redactor_is_installed():
     assert isinstance(REDACTOR, SecretRedactor)
+
+
+# ── redaction must not corrupt %-formatting ────────────────────
+#
+# Regression: the filter used to coerce every ``record.args`` entry to ``str``,
+# so any third-party log call using a numeric placeholder raised inside the
+# formatter. uvicorn's "Started server process [%d]" produced a full traceback
+# per line on Railway and buried the real startup log.
+
+def test_redactor_preserves_numeric_args_so_percent_d_still_formats():
+    redactor = SecretRedactor()
+    redactor.register(FAKE_BOT_TOKEN)
+    record = logging.LogRecord(
+        "uvicorn.error", logging.INFO, __file__, 1,
+        "Started server process [%d]", (1,), None,
+    )
+    redactor.filter(record)
+    assert record.args == (1,)
+    assert record.getMessage() == "Started server process [1]"
+
+
+def test_redactor_preserves_mixed_arg_types():
+    redactor = SecretRedactor()
+    redactor.register(FAKE_BOT_TOKEN)
+    record = logging.LogRecord(
+        "uvicorn.error", logging.INFO, __file__, 1,
+        "Uvicorn running on %s://%s:%d", ("http", "0.0.0.0", 8080), None,
+    )
+    redactor.filter(record)
+    assert record.getMessage() == "Uvicorn running on http://0.0.0.0:8080"
+
+
+def test_redactor_still_scrubs_a_secret_passed_as_an_arg():
+    redactor = SecretRedactor()
+    redactor.register(FAKE_BOT_TOKEN)
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "token=%s", (FAKE_BOT_TOKEN,), None,
+    )
+    redactor.filter(record)
+    assert FAKE_BOT_TOKEN not in record.getMessage()
+    assert "***REDACTED***" in record.getMessage()
+
+
+def test_redactor_scrubs_a_secret_hidden_in_a_non_string_arg():
+    """Type preservation must not become an escape hatch for a leak."""
+    redactor = SecretRedactor()
+    redactor.register(FAKE_BOT_TOKEN)
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "payload=%s", ({"token": FAKE_BOT_TOKEN},), None,
+    )
+    redactor.filter(record)
+    assert FAKE_BOT_TOKEN not in record.getMessage()
+
+
+def test_redactor_scrubs_dict_style_args_without_coercing_numbers():
+    redactor = SecretRedactor()
+    redactor.register(FAKE_BOT_TOKEN)
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1,
+        "%(name)s spent %(weight)d", {"name": FAKE_BOT_TOKEN, "weight": 20}, None,
+    )
+    redactor.filter(record)
+    message = record.getMessage()
+    assert FAKE_BOT_TOKEN not in message
+    assert message.endswith("spent 20")
+
+
+# ── formatters must not raise on a malformed log call ───────────
+
+def test_json_formatter_degrades_instead_of_raising():
+    record = logging.LogRecord(
+        "third.party", logging.INFO, __file__, 1, "count [%d]", ("not-a-number",), None,
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert "count [%d]" in payload["msg"]
+    assert "unformattable" in payload["msg"]
+    assert payload["level"] == "INFO"
+
+
+def test_plain_formatter_degrades_instead_of_raising():
+    record = logging.LogRecord(
+        "third.party", logging.INFO, __file__, 1, "count [%d]", ("not-a-number",), None,
+    )
+    line = PlainFormatter().format(record)
+    assert "unformattable" in line
+    assert "third.party" in line

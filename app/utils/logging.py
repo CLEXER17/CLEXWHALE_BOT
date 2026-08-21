@@ -45,16 +45,39 @@ class SecretRedactor(logging.Filter):
                 text = text.replace(secret, _REDACTED)
         return text
 
+    def _scrub_arg(self, value: Any) -> Any:
+        """Redact one ``record.args`` entry **without changing its type**.
+
+        ``record.args`` is consumed as ``msg % args``, so coercing entries to
+        ``str`` breaks every numeric placeholder in a third-party log call.
+        uvicorn logs ``"Started server process [%d]"``; a stringified pid made
+        ``getMessage()`` raise ``TypeError`` inside the formatter, which turned
+        each of those lines into a multi-page logging traceback on Railway.
+
+        Strings are scrubbed directly. Anything else is only replaced when it
+        actually carries a secret — in which case a redacted string is the
+        correct answer regardless of what the placeholder wanted.
+        """
+        if isinstance(value, str):
+            return self._scrub(value)
+        try:
+            text = str(value)
+        except Exception:  # a __str__ that raises must not break logging
+            return value
+        scrubbed = self._scrub(text)
+        return scrubbed if scrubbed != text else value
+
     def filter(self, record: logging.LogRecord) -> bool:
         if not self._secrets:
             return True
         try:
-            record.msg = self._scrub(str(record.msg))
+            if isinstance(record.msg, str):
+                record.msg = self._scrub(record.msg)
             if record.args:
                 if isinstance(record.args, dict):
-                    record.args = {k: self._scrub(str(v)) for k, v in record.args.items()}
+                    record.args = {k: self._scrub_arg(v) for k, v in record.args.items()}
                 else:
-                    record.args = tuple(self._scrub(str(a)) for a in record.args)
+                    record.args = tuple(self._scrub_arg(a) for a in record.args)
             for key, value in list(record.__dict__.items()):
                 if key not in _RESERVED and isinstance(value, str):
                     record.__dict__[key] = self._scrub(value)
@@ -66,13 +89,27 @@ class SecretRedactor(logging.Filter):
 REDACTOR = SecretRedactor()
 
 
+def _safe_message(record: logging.LogRecord) -> str:
+    """``record.getMessage()`` that cannot raise.
+
+    A single malformed third-party log call — wrong placeholder, wrong arg count
+    — otherwise makes the formatter raise for every occurrence, and Python
+    answers each one with a full traceback on stderr. One cosmetic mistake then
+    buries the real startup log. Degrade to the raw template instead.
+    """
+    try:
+        return record.getMessage()
+    except Exception:
+        return f"{record.msg!s} [unformattable args: {record.args!r}]"
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": _safe_message(record),
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
@@ -96,6 +133,11 @@ class PlainFormatter(logging.Formatter):
         )
 
     def format(self, record: logging.LogRecord) -> str:
+        # Resolve the message safely first, then let the parent do the rest
+        # (exception text, stack info). With ``args`` cleared the parent's own
+        # ``getMessage()`` call is a no-op and cannot raise on a bad template.
+        record.msg = _safe_message(record)
+        record.args = ()
         base = super().format(record)
         extras = {
             k: v
