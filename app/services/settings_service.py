@@ -33,6 +33,10 @@ log = get_logger(__name__)
 
 # ── setting keys (also the audit action targets) ───────────────
 KEY_MONITORING = "monitoring_enabled"
+#: The global pause. Distinct from ``monitoring_enabled`` on purpose: pausing
+#: must not destroy the monitoring setting an admin chose, so /go restores
+#: exactly the state that was in force before /pause.
+KEY_PAUSED = "paused"
 KEY_PUBLIC_MODE = "public_mode"
 KEY_MIN_WHALE = "min_whale_value"
 KEY_MIN_TRADE = "min_trade_value"
@@ -54,6 +58,7 @@ KEY_WINDOW = "default_window"
 BOOL_KEYS = frozenset(
     {
         KEY_MONITORING,
+        KEY_PAUSED,
         KEY_PUBLIC_MODE,
         KEY_ALL_COINS,
         KEY_TRADES,
@@ -78,6 +83,11 @@ MARGIN_OFF = 0.0
 @dataclass(frozen=True)
 class RuntimeConfig:
     monitoring_enabled: bool = True
+    #: Global pause. When true the bot does nothing at all: no market feeds, no
+    #: detection, no alerts, and every command except /go, /status and the
+    #: always-available basics is refused. Stored in the database, so a pause
+    #: survives a redeploy.
+    paused: bool = False
     public_mode: bool = False
 
     min_whale_value: float = 2_000_000.0
@@ -109,6 +119,16 @@ class RuntimeConfig:
 
     default_window: str = DEFAULT_WINDOW
     tracked_wallets: tuple[str, ...] = field(default=())
+
+    @property
+    def monitoring_active(self) -> bool:
+        """Whether the ingest pipeline should run at all.
+
+        Every gate in :mod:`app.whale.engine` reads this rather than
+        ``monitoring_enabled``, so the global pause cannot be bypassed by a code
+        path that forgot about it.
+        """
+        return self.monitoring_enabled and not self.paused
 
     # ── thresholds ────────────────────────────────────────────
     def threshold_for(self, threshold_class: str) -> float:
@@ -206,6 +226,7 @@ class SettingsService:
         env = self.env
         defaults: dict[str, Any] = {
             KEY_MONITORING: True,
+            KEY_PAUSED: False,
             KEY_PUBLIC_MODE: env.public_mode,
             KEY_MIN_WHALE: float(env.min_whale_value),
             KEY_MIN_TRADE: env.min_trade_value,
@@ -288,6 +309,7 @@ class SettingsService:
 
         return RuntimeConfig(
             monitoring_enabled=as_bool(KEY_MONITORING, True),
+            paused=as_bool(KEY_PAUSED, False),
             public_mode=as_bool(KEY_PUBLIC_MODE, False),
             min_whale_value=as_float(KEY_MIN_WHALE) or float(self.env.min_whale_value),
             min_trade_value=as_float(KEY_MIN_TRADE),
@@ -355,6 +377,15 @@ class SettingsService:
 
     async def set_monitoring(self, enabled: bool, admin_id: int | None = None) -> None:
         await self.set_value(KEY_MONITORING, bool(enabled), admin_id)
+
+    async def set_paused(self, paused: bool, admin_id: int | None = None) -> None:
+        """The global pause (/pause and /go).
+
+        Written to the database like any other setting, so it is audited and it
+        survives a restart: a paused bot comes back paused rather than silently
+        resuming after a redeploy.
+        """
+        await self.set_value(KEY_PAUSED, bool(paused), admin_id)
 
     async def set_public_mode(self, enabled: bool, admin_id: int | None = None) -> None:
         await self.set_value(KEY_PUBLIC_MODE, bool(enabled), admin_id)

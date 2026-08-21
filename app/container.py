@@ -109,6 +109,32 @@ class AppContainer:
             return 0.0
         return (utc_now() - self.started_at).total_seconds()
 
+    def runtime_warnings(self) -> list[str]:
+        """Conditions that only exist while the process runs.
+
+        The delivery ones exist because "411 whale events, 0 alerts delivered"
+        was reported from production with nothing in ``/health`` to explain it:
+        the drop happened at recipient resolution and was logged at debug level
+        with no counter. Now the count is a warning wherever health is shown.
+        """
+        out: list[str] = []
+        alerts = self.alerts.stats()
+        if self.settings.config.paused:
+            out.append("Globally paused (/pause): no monitoring, no alerts. Send /go to resume.")
+        if not alerts.get("bot_attached"):
+            out.append("Telegram bot not attached: alerts cannot be delivered.")
+        if alerts.get("no_recipients"):
+            out.append(
+                f"{alerts['no_recipients']} alert(s) had no recipient — every admin is "
+                "unsubscribed (/stop) or has never opened a chat with the bot, and "
+                "public mode adds no subscribers."
+            )
+        if alerts.get("queued") and not alerts.get("sent") and not self.settings.config.paused:
+            out.append(
+                f"{alerts['queued']} alert(s) were queued and none has been delivered."
+            )
+        return out
+
     async def health(self) -> dict[str, Any]:
         """Payload for ``GET /health``.
 
@@ -146,9 +172,10 @@ class AppContainer:
                 "rest_healthy": self.rest.healthy,
             },
             "monitoring_enabled": self.settings.config.monitoring_enabled,
+            "paused": self.settings.config.paused,
             "public_mode": self.settings.config.public_mode,
             "alerts": self.alerts.stats(),
-            "warnings": self.warnings,
+            "warnings": [*self.warnings, *self.runtime_warnings()],
         }
 
     def stats(self) -> dict[str, Any]:

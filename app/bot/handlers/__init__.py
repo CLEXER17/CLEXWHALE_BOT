@@ -6,7 +6,6 @@ command menu cannot drift apart.
 
 from __future__ import annotations
 
-from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -15,6 +14,13 @@ from telegram.ext import (
     filters,
 )
 
+from app.bot.commands import (
+    ADMIN_COMMAND_NAMES,
+    CO_ADMIN_COMMAND_MENU,
+    MAIN_ADMIN_COMMAND_MENU,
+    MAIN_ADMIN_COMMAND_NAMES,
+    PUBLIC_COMMAND_MENU,
+)
 from app.bot.handlers import admin, callbacks, common, data, prompts
 
 #: ``(command, handler)`` — the order only matters for readability.
@@ -36,6 +42,8 @@ COMMANDS = (
     # monitoring
     ("startmonitor", admin.cmd_startmonitor),
     ("stopmonitor", admin.cmd_stopmonitor),
+    ("pause", admin.cmd_pause),
+    ("go", admin.cmd_go),
     # filters
     ("threshold", admin.cmd_threshold),
     ("setthreshold", admin.cmd_setthreshold),
@@ -58,20 +66,6 @@ COMMANDS = (
     ("audit", admin.cmd_audit),
 )
 
-#: The short menu Telegram shows in the ✚ button. Admin-only commands are left
-#: out on purpose: advertising them to every user is noise, and they are
-#: refused anyway.
-PUBLIC_COMMAND_MENU = (
-    BotCommand("start", "Open the whale monitor"),
-    BotCommand("stop", "Stop receiving alerts"),
-    BotCommand("help", "List the available commands"),
-    BotCommand("status", "Monitoring status"),
-    BotCommand("whales", "Recent whale events"),
-    BotCommand("orders", "Large resting orders"),
-    BotCommand("positions", "Tracked open positions"),
-    BotCommand("coins", "Monitored coins"),
-)
-
 
 def register_handlers(application: Application) -> None:
     for name, handler in COMMANDS:
@@ -90,4 +84,12 @@ def register_handlers(application: Application) -> None:
     application.add_error_handler(common.on_error)
 
 
-__all__ = ["COMMANDS", "PUBLIC_COMMAND_MENU", "register_handlers"]
+__all__ = [
+    "ADMIN_COMMAND_NAMES",
+    "CO_ADMIN_COMMAND_MENU",
+    "COMMANDS",
+    "MAIN_ADMIN_COMMAND_MENU",
+    "MAIN_ADMIN_COMMAND_NAMES",
+    "PUBLIC_COMMAND_MENU",
+    "register_handlers",
+]

@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from telegram import LinkPreviewOptions
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
 from telegram.ext import AIORateLimiter, Application, ApplicationBuilder, Defaults
 
-from app.bot.handlers import PUBLIC_COMMAND_MENU, register_handlers
+from app.bot.commands import publish_command_menus
+from app.bot.handlers import register_handlers
 from app.container import AppContainer
 from app.utils.logging import get_logger
 
@@ -98,10 +98,7 @@ async def post_init(application: Application) -> None:
         extra={"bot_username": me.username, "bot_id": me.id},
     )
 
-    try:
-        await application.bot.set_my_commands(PUBLIC_COMMAND_MENU)
-    except TelegramError as exc:
-        log.warning("Could not publish the command menu", extra={"error": str(exc)})
+    await publish_command_menus(application.bot, container)
 
 
 __all__ = ["build_application", "post_init"]

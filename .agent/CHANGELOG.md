@@ -4,6 +4,57 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-22 — The admin/wallet/data-integrity audit, and a global pause
+
+The 17 reported defects in the "ADMIN UI + WALLET DISPLAY + DATA INTEGRITY"
+audit had already been fixed in the production code; what was missing was the
+suite that proves each one stays fixed. Written against the *seam that caused*
+each defect rather than the Telegram text that displayed it — a test that only
+asserts on the rendered string passes just as happily when the root cause comes
+back wearing different words.
+
+- **`tests/test_admin_ui_integrity.py` (new, 32 tests).** Issues 1–14. Wallets:
+  the canonical value is asserted at the store, at the round trip through the
+  database, and in every list view and alert body, with `TRUNCATED =
+  re.compile(r"0x[0-9a-fA-F]{2,10}(\.{2,3}|…)")` used as an explicit
+  never-matches guard; `short_wallet` stays confined to button labels. Callbacks:
+  all 19 `inline.py` builders checked for a wallet-free, ≤ 64-byte payload, and a
+  wallet proved to be resolved from the database rather than the payload.
+  Identity: `identity_key()` for one `tid` observed twice — once before
+  enrichment (`BUY`) and once after (`LONG`) — plus the durable
+  `_already_recorded` gate for a duplicate that outlived the memory cache.
+  Never-invent-data: real `WhaleDetector` output through `container.alerts.render`
+  for the aggregated book level with no owner, the position with no snapshot, and
+  the absent liquidation price. Authority: every admin command driven *as a
+  stranger* and refused server-side, `publish_command_menus()` inspected per
+  Telegram scope, and a demoted co-admin's chat scope deleted.
+- **`/recent` was advertised publicly but published only to admins** — the one
+  real production bug the new suite found. `data.cmd_recent` requires only
+  `VIEW_WHALES` and `texts.help_text` listed it for everyone, but
+  `BotCommand("recent", …)` sat in `CO_ADMIN_EXTRA`, so it reached only the admin
+  chat scopes. Fixed in `app/bot/commands.py` by moving `recent` into
+  `PUBLIC_COMMAND_MENU`. The three hand-written sources of truth (menu, help
+  text, handler capability) are now held together by
+  `test_what_is_advertised_publicly_is_exactly_what_a_user_may_invoke`, which
+  drives every advertised command as a stranger expecting no refusal and every
+  admin command as a stranger expecting refusal — so drift is caught in both
+  directions. One caller id per command, because the rate limiter is per user.
+- **`tests/test_global_pause.py` (new, 15 tests).** `/pause` stops everything and
+  `/go` starts it again. The gate is enforced once in the middleware — a
+  per-handler check is a check somebody forgets to add — and the tests hold its
+  four properties: every other command, inline button and half-finished prompt is
+  refused; the exemptions are exactly `/go`, `/status`, `/panel` and `/stop`
+  (refusing the read-only views would leave an admin unable to see *why*
+  everything is refused, and being asked to stop messaging someone is not a
+  privileged operation); `monitoring_enabled` is left exactly as configured, so
+  `/go` restores rather than switches on; and the pause is a database setting, so
+  two fresh `AppContainer.restore()` cycles come back paused rather than silently
+  resuming. A normal user is told the bot is paused but never told `/go` exists.
+- Suite is now **474 passed, 0 failed, 0 skipped** in 28.58 s (from 426), and
+  `compileall app/ tests/` is clean.
+
+---
+
 ## 2026-08-21 — Order state and position state are no longer allowed to bleed
 
 An order and a position are separate objects with separate lifecycles. Live

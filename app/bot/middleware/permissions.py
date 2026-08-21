@@ -157,12 +157,18 @@ def requires(
     capability: Capability,
     *,
     register_user: bool = True,
+    allow_when_paused: bool = False,
 ) -> Callable[[ActorHandler], PlainHandler]:
     """Wrap a handler so it only runs for a caller holding ``capability``.
 
     The wrapped function is called as ``handler(update, context, actor)``. It can
     assume the actor is authorized; it must not re-derive identity from callback
     data or command arguments.
+
+    ``allow_when_paused`` marks the few handlers that must still work while the
+    bot is globally paused — /go above all, plus the read-only status views that
+    tell an admin *why* nothing is happening. Everything else is refused with a
+    single message, enforced here so no handler can forget the pause.
     """
 
     def decorator(func: ActorHandler) -> PlainHandler:
@@ -187,6 +193,12 @@ def requires(
                 )
             except AdminError as exc:
                 await refuse(update, str(exc))
+                return None
+
+            # The pause is checked after authorization so an unauthorized caller
+            # learns nothing about the bot's state from the refusal it gets.
+            if container.settings.config.paused and not allow_when_paused:
+                await refuse(update, texts.paused_notice(admin=actor.is_admin))
                 return None
 
             if register_user:

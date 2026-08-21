@@ -52,6 +52,16 @@ def back_button(target: str = CB_PANEL) -> InlineKeyboardButton:
 def control_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
     """The layout reflects live state: the monitoring button shows what *is*."""
     monitoring = "🟢 Monitoring: ON" if config.monitoring_enabled else "🔴 Monitoring: OFF"
+    if config.paused:
+        # While paused every other button is refused by the middleware, so the
+        # panel offers the one action that still works instead of a wall of
+        # buttons that answer "the bot is paused".
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("▶️ RESUME BOT", callback_data=_cb(CB_MON, "resume"))],
+                [InlineKeyboardButton("📡 Status", callback_data=_cb(CB_MON, "status"))],
+            ]
+        )
     return InlineKeyboardMarkup(
         [
             [
@@ -88,6 +98,15 @@ def control_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
 
 # ── monitoring (spec §10) ──────────────────────────────────────
 def monitoring_controls(config: RuntimeConfig) -> InlineKeyboardMarkup:
+    if config.paused:
+        # Starting the detectors changes nothing while the global pause holds, so
+        # the only offer is to lift it.
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("▶️ RESUME BOT", callback_data=_cb(CB_MON, "resume"))],
+                [InlineKeyboardButton("🔄 Refresh Status", callback_data=_cb(CB_MON, "status"))],
+            ]
+        )
     if config.monitoring_enabled:
         action = InlineKeyboardButton(
             "🔴 STOP MONITORING", callback_data=_cb(CB_MON, "stop")
@@ -99,6 +118,7 @@ def monitoring_controls(config: RuntimeConfig) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [action],
+            [InlineKeyboardButton("⏸️ PAUSE EVERYTHING", callback_data=_cb(CB_MON, "pause"))],
             [InlineKeyboardButton("🔄 Refresh Status", callback_data=_cb(CB_MON, "status"))],
             [back_button()],
         ]
@@ -208,6 +228,16 @@ def admin_panel() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("➖ Remove Co-Admin", callback_data=_cb(CB_ADMIN, "remove"))],
             [InlineKeyboardButton("📋 List Co-Admins", callback_data=_cb(CB_ADMIN, "list"))],
             [back_button()],
+        ]
+    )
+
+
+def admin_roster_panel() -> InlineKeyboardMarkup:
+    """Keyboard for the 📋 List Co-Admins panel — distinct from the admin home."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Refresh", callback_data=_cb(CB_ADMIN, "list"))],
+            [back_button(CB_ADMIN)],
         ]
     )
 

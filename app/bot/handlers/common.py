@@ -87,8 +87,14 @@ async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: A
     await respond(update, text, keyboard, edit=False)
 
 
-@requires(Capability.CHANGE_SETTINGS)
+@requires(Capability.CHANGE_SETTINGS, allow_when_paused=True)
 async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    """The admin control panel.
+
+    Exempt from the global pause because while paused it renders the single
+    ▶️ RESUME button — refusing it would leave the pause liftable only by typing
+    /go, and every other panel button is still refused by the middleware.
+    """
     container = get_container(context)
     text, keyboard = await views.panel_view(container, actor)
     await respond(update, text, keyboard, edit=False)

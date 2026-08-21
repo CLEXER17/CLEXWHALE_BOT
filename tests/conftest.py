@@ -229,6 +229,8 @@ class FakeBot:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
         self.answers: list[dict[str, Any]] = []
+        self.menus: list[dict[str, Any]] = []
+        self.deleted_menus: list[Any] = []
         self.raises: Exception | None = None
         self._counter = 0
 
@@ -252,7 +254,13 @@ class FakeBot:
         self.answers.append({"text": text, "show_alert": show_alert})
         return True
 
-    async def set_my_commands(self, *a: Any, **kw: Any) -> bool:
+    async def set_my_commands(self, commands: Any = (), **kw: Any) -> bool:
+        self.menus.append({"commands": tuple(commands), "scope": kw.get("scope")})
+        return True
+
+    async def delete_my_commands(self, **kw: Any) -> bool:
+        """A demoted co-admin's chat scope is deleted, not overwritten."""
+        self.deleted_menus.append(kw.get("scope"))
         return True
 
 

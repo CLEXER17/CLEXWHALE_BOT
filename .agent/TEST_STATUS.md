@@ -10,7 +10,7 @@ with:
 The bare `python` on PATH is **not** the project interpreter and lacks
 `pytest_asyncio`. On Linux/macOS the equivalent is `.venv/bin/python -m pytest -q`.
 
-Last full run: **2026-08-21**
+Last full run: **2026-08-22**
 Environment: Python 3.13.3, pytest 8.4.2, `asyncio_mode = auto`,
 SQLite (`sqlite+aiosqlite:///:memory:`) — no network, no Telegram, no Postgres
 required.
@@ -19,30 +19,39 @@ required.
 
 | | |
 |---|---|
-| **TOTAL** | **426** |
-| **PASSED** | **426** |
+| **TOTAL** | **474** |
+| **PASSED** | **474** |
 | **FAILED** | **0** |
 | **SKIPPED** | **0** |
 | xfailed / errors | 0 |
-| Wall time | 26.85 s |
+| Wall time | 28.58 s |
 
 ## Per module (each run on its own)
 
 | Module | Tests | Result | Time |
 |---|---|---|---|
-| `tests/test_bot_application.py` | 6 | 6 passed | 1.81 s |
-| `tests/test_config.py` | 34 | 34 passed | 0.07 s |
-| `tests/test_database.py` | 68 | 68 passed | 4.58 s |
-| `tests/test_dedup.py` | 21 | 21 passed | 0.12 s |
-| `tests/test_detector_orders.py` | 23 | 23 passed | 0.03 s |
-| `tests/test_detector_positions.py` | 23 | 23 passed | 0.03 s |
-| `tests/test_detector_trades.py` | 17 | 17 passed | 0.03 s |
-| `tests/test_engine_pipeline.py` | 22 | 22 passed | 7.87 s |
-| `tests/test_filters.py` | 28 | 28 passed | 0.05 s |
-| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.26 s |
-| `tests/test_permissions.py` | 48 | 48 passed | 4.88 s |
-| `tests/test_resilience.py` | 50 | 50 passed | 4.84 s |
-| `tests/test_telegram_handlers.py` | 66 | 66 passed | 6.33 s |
+| `tests/test_admin_ui_integrity.py` | 32 | 32 passed | 4.61 s |
+| `tests/test_bot_application.py` | 7 | 7 passed | 4.71 s |
+| `tests/test_config.py` | 34 | 34 passed | 0.22 s |
+| `tests/test_database.py` | 68 | 68 passed | 6.60 s |
+| `tests/test_dedup.py` | 21 | 21 passed | 0.13 s |
+| `tests/test_detector_orders.py` | 23 | 23 passed | 0.10 s |
+| `tests/test_detector_positions.py` | 23 | 23 passed | 0.05 s |
+| `tests/test_detector_trades.py` | 17 | 17 passed | 0.09 s |
+| `tests/test_engine_pipeline.py` | 22 | 22 passed | 9.56 s |
+| `tests/test_filters.py` | 28 | 28 passed | 0.08 s |
+| `tests/test_global_pause.py` | 15 | 15 passed | 2.93 s |
+| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.11 s |
+| `tests/test_permissions.py` | 48 | 48 passed | 7.20 s |
+| `tests/test_resilience.py` | 50 | 50 passed | 4.90 s |
+| `tests/test_telegram_handlers.py` | 66 | 66 passed | 9.98 s |
+
+The per-module times sum to more than the full-suite wall time because each row
+pays its own interpreter and fixture start-up. The wall time is also not stable
+on Windows: the same suite took 396 s immediately after `compileall` rewrote
+every `.pyc`, and 28.55 s on the next run, so treat a slow run as an
+antivirus/filesystem artefact rather than a regression — the pass count is the
+signal.
 
 Support files (no tests of their own): `tests/conftest.py` (fixtures, fake
 Telegram objects, environment scrubbing), `tests/factories.py` (builders for
@@ -59,11 +68,11 @@ Hyperliquid shapes).
 | Order ≠ position separation | `test_order_position_separation.py` (a resting BUY/SELL never becomes LONG/SHORT; a fill or cancellation never moves position state; a close is measured from the last verified non-zero snapshot) |
 | Order cancellation detection | `test_detector_orders.py` (cancel vs fill vs exchange-initiated cancel) |
 | Coin filtering | `test_filters.py`, `test_engine_pipeline.py::test_a_coin_outside_the_filter_produces_nothing`, `…::test_an_unknown_coin_is_not_alerted` |
-| Duplicate prevention | `test_dedup.py`, `test_engine_pipeline.py::test_the_same_trade_id_arriving_twice_alerts_once`, `…::test_a_second_similar_trade_is_held_by_the_cooldown`, `…::test_a_redeploy_does_not_replay_the_last_alert` |
-| Admin permission checks | `test_permissions.py` |
+| Duplicate prevention | `test_dedup.py`, `test_engine_pipeline.py::test_the_same_trade_id_arriving_twice_alerts_once`, `…::test_a_second_similar_trade_is_held_by_the_cooldown`, `…::test_a_redeploy_does_not_replay_the_last_alert`, `test_admin_ui_integrity.py` (one fill observed twice; a duplicate that outlived the memory cache) |
+| Admin permission checks | `test_permissions.py`, `test_admin_ui_integrity.py` (command scopes, and the same commands driven as a stranger) |
 | Co-admin permission checks | `test_permissions.py` (the §29 matrix, including every action a co-admin must be refused) |
 | Public / private mode | `test_permissions.py`, `test_telegram_handlers.py` |
-| Telegram callback handling | `test_telegram_handlers.py` (including forged `callback_data` from an unauthorised user) |
+| Telegram callback handling | `test_telegram_handlers.py` (including forged `callback_data` from an unauthorised user), `test_admin_ui_integrity.py` (no builder emits a wallet or an oversized payload) |
 | Database operations | `test_database.py` (all 11 repositories, commit/rollback, unique constraints, restart/redeploy restore) |
 | WebSocket reconnect | `test_resilience.py` (drop → reconnect → resubscribe, backoff ladder, cap, no leaked reader) |
 | API failure handling | `test_resilience.py` (429 / 5xx / 4xx / timeout / unparseable body / exhausted budget) |
@@ -87,6 +96,31 @@ a price, a checked wallet with no triggers renders `N/A`, and an unchecked walle
 renders `N/A (not checked)` — so an unavailable value can never be printed as a
 real one.
 
+## Beyond §36: the two audit suites
+
+`tests/test_admin_ui_integrity.py` (32 tests) is the regression suite for the
+"ADMIN UI + WALLET DISPLAY + DATA INTEGRITY" audit. Each test drives the seam
+that caused the reported defect rather than the Telegram text that displayed it:
+
+| Reported defect | Seam asserted |
+|---|---|
+| Wallet shown as `0x3200...c407` | `wallet_code()` output in every list view and alert body, plus the round trip through the database — nothing between the feed and the screen shortens the canonical value. `short_wallet` is allowed only in button labels. |
+| Wallet not monospace | the rendered `<code>` wrapper, and that bolding is not substituted for it |
+| Co-Admin List button dead | `on_callback("adm:list")` renders its own panel, distinct from the home edit, and answers the press |
+| Users see admin commands | `publish_command_menus()` inspected per scope; every admin command then driven *as a stranger* and refused server-side; a demoted co-admin's chat scope deleted |
+| Duplicate whale events | `identity_key()` — one `tid` observed twice pre- and post-enrichment, distinct `oid`s kept apart, and `_already_recorded` for a duplicate that outlived the in-memory cache |
+| $4.60M under a $5,000,000 heading | `WhaleFilter.evaluate` at, just below and just above the per-class gate |
+| "Alerts delivered: 0" with 411 events | the whole `AlertService` path with and without a subscribed recipient — the zero is explained by `no_recipients`, surfaced in `runtime_warnings()` and the status panel, not hidden |
+| `N/A` owner / notional / liquidation | real `WhaleDetector` output through `container.alerts.render`: an aggregated book level never claims an owner, a snapshot-less position says so, a liquidation price is never computed |
+| Full address in `callback_data` | every one of the 19 `inline.py` builders: no `0x…` payload, and ≤ 64 bytes UTF-8 |
+
+`tests/test_global_pause.py` (15 tests) covers `/pause` and `/go`: the middleware
+gate that refuses every command, button and half-finished prompt; the four
+deliberate exemptions (`/go`, `/status`, `/panel`, `/stop`); that
+`monitoring_enabled` is left exactly as configured; that nothing is delivered
+while paused; and that the pause survives a redeploy through two fresh
+`AppContainer.restore()` cycles.
+
 ## Defects this suite found (fixed)
 
 ### 1. Concurrent-write race dropped alerts
@@ -99,6 +133,27 @@ wallet in flight at once raced on the read-then-write of the `wallets` /
 `test_a_zero_cooldown_lets_every_distinct_trade_through` (0 alerts instead of 2).
 Fixed by `WhaleEngine._write_lock` (`app/whale/engine.py:124`), held only around
 the database write and not around REST enrichment.
+
+### 4. `/recent` was advertised publicly but published only to admins
+
+Found by `test_admin_ui_integrity.py::test_a_normal_user_is_never_shown_an_admin_identity_or_control`,
+which failed with `admin commands disclosed to a normal user: ['recent']`.
+
+Three sources of truth are written by hand and had drifted: `data.cmd_recent` is
+`@requires(Capability.VIEW_WHALES)` (public), `texts.help_text` listed `/recent`
+under "Whale data" for everyone, but `BotCommand("recent", …)` sat in
+`CO_ADMIN_EXTRA` — so it was published *only* to the admin chat scopes. An
+ordinary user was told about a command that never appeared in their ✚ menu, and
+the audit's own disclosure check read the mismatch as a leak.
+
+Fixed in `app/bot/commands.py` by moving `recent` into `PUBLIC_COMMAND_MENU`.
+Rather than re-asserting the three lists,
+`test_what_is_advertised_publicly_is_exactly_what_a_user_may_invoke` now drives
+every publicly advertised command as a stranger (expecting no refusal) and every
+admin command as a stranger (expecting refusal), so visibility and authority
+cannot drift apart again in either direction. Each command gets its own caller
+id: the rate limiter is per Telegram user, and thirty-odd invocations from one id
+would be throttled rather than answered.
 
 ## Defects found in production (fixed, now covered)
 

@@ -15,6 +15,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.bot import views
+from app.bot.commands import sync_command_menus
 from app.bot.keyboards import inline
 from app.bot.messages import texts
 from app.bot.middleware.permissions import get_container, requires, respond
@@ -122,6 +123,32 @@ async def cmd_stopmonitor(
     container = get_container(context)
     await container.settings.set_monitoring(False, actor.telegram_id)
     await respond(update, texts.monitoring_stopped(), edit=False)
+    text, keyboard = await views.status_view(container)
+    await respond(update, text, keyboard, edit=False)
+
+
+# ── global pause / resume ──────────────────────────────────────
+@requires(Capability.CONTROL_MONITORING, allow_when_paused=True)
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    """Stop the bot doing anything at all until /go.
+
+    Wider than /stopmonitor: that only turns the detectors off, this also
+    withholds every alert and refuses every other command. The
+    ``monitoring_enabled`` setting is left untouched, so /go restores whatever
+    was configured before the pause.
+    """
+    container = get_container(context)
+    await container.settings.set_paused(True, actor.telegram_id)
+    await respond(update, texts.paused_confirmation(), edit=False)
+
+
+@requires(Capability.CONTROL_MONITORING, allow_when_paused=True)
+async def cmd_go(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    """Lift the global pause."""
+    container = get_container(context)
+    was_paused = container.settings.config.paused
+    await container.settings.set_paused(False, actor.telegram_id)
+    await respond(update, texts.resumed_confirmation(was_paused), edit=False)
     text, keyboard = await views.status_view(container)
     await respond(update, text, keyboard, edit=False)
 
@@ -400,6 +427,7 @@ async def apply_add_admin(
         return
     container.alerts.invalidate_recipients()
     await respond(update, texts.co_admin_added(target), edit=False)
+    await sync_command_menus(context.bot, container)
     await _notify_role_change(context, target, texts.promoted_notice())
 
 
@@ -429,6 +457,9 @@ async def apply_remove_admin(
         return
     container.alerts.invalidate_recipients()
     await respond(update, texts.co_admin_removed(target), edit=False)
+    # Delete their chat scope: Telegram would otherwise keep showing them the
+    # admin commands they can no longer use.
+    await sync_command_menus(context.bot, container, demoted=target)
     await _notify_role_change(context, target, texts.demoted_notice())
 
 

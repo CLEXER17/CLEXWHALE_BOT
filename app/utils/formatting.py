@@ -159,7 +159,26 @@ def pct_distance(target: float | None, reference: float | None) -> float | None:
 
 # ── identities ─────────────────────────────────────────────────
 
+def wallet_code(address: str | None) -> str:
+    """The one canonical way to show a wallet to a human.
+
+    Complete 42-character address, lowercased, monospace so Telegram offers
+    tap-to-copy. A truncated address is not actionable — it cannot be pasted
+    into a block explorer and two different whales can share a prefix and a
+    suffix — so no list view, alert or admin panel abbreviates it.
+    """
+    if not address:
+        return "<code>unknown</code>"
+    return f"<code>{escape_html(str(address).strip().lower())}</code>"
+
+
 def short_wallet(address: str | None, lead: int = 6, tail: int = 4) -> str:
+    """Abbreviate an address for places that cannot hold 42 characters.
+
+    Inline-keyboard button labels only. Never for message bodies (use
+    :func:`wallet_code`), never for storage, and never as the canonical value:
+    the database always keeps the complete address.
+    """
     if not address:
         return "unknown"
     if len(address) <= lead + tail + 3:

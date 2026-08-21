@@ -137,6 +137,18 @@ async def admin_home_view(container: AppContainer, actor: Actor) -> View:
     return text, keyboard
 
 
+async def admin_roster_view(container: AppContainer, actor: Actor) -> View:
+    """The 📋 List Co-Admins panel.
+
+    ``list_admins`` re-checks ``Capability.VIEW_ADMINS`` for ``actor``, so an
+    unauthorised caller is refused inside the service, not merely hidden from
+    the keyboard.
+    """
+    entries = await container.admins.list_admins(actor.telegram_id)
+    text = texts.admin_roster(entries, container.admins.main_admin_id)
+    return text, inline.admin_roster_panel()
+
+
 async def admin_remove_view(container: AppContainer, actor: Actor) -> View:
     entries = await container.admins.list_admins(actor.telegram_id)
     co_admins = [entry for entry in entries if entry.get("role") == ROLE_CO]

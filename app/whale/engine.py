@@ -51,11 +51,11 @@ from app.hyperliquid.websocket import HyperliquidWebSocket
 from app.services.settings_service import RuntimeConfig, SettingsService
 from app.utils.formatting import DataPoint, utc_now
 from app.utils.logging import get_logger
-from app.whale.dedup import Deduplicator
+from app.whale.dedup import IDENTITY_TTL, Deduplicator
 from app.whale.detector import OrderState, WhaleDetector
 from app.whale.events import EventType, WhaleEvent
 from app.whale.filters import WhaleFilter
-from app.whale.lifecycle import may_modify_position
+from app.whale.lifecycle import POSITION_SIDES, may_modify_position
 from app.whale.tracker import WalletTracker, order_state_from_open_order
 
 log = get_logger(__name__)
@@ -138,6 +138,9 @@ class WhaleEngine:
         self._write_lock = asyncio.Lock()
         self._config_changed = asyncio.Event()
         self._running = False
+        #: Last pause state acted on, so a settings change that did not touch the
+        #: pause does not tear the feeds down and rebuild them.
+        self._paused_seen = settings.config.paused
         self.started_at: datetime | None = None
 
         # counters
@@ -147,6 +150,10 @@ class WhaleEngine:
         self.events_alerted = 0
         self.queue_dropped = 0
         self.persist_errors = 0
+        #: Events the durable gate caught that the in-memory cache had forgotten.
+        self.duplicate_persisted = 0
+        #: Position writes refused because no verified LONG/SHORT side was known.
+        self.position_writes_skipped = 0
         self.last_event_at: datetime | None = None
         self.last_alert_at: datetime | None = None
 
@@ -160,6 +167,25 @@ class WhaleEngine:
     async def _on_config_change(self, config: RuntimeConfig) -> None:
         self.tracker.pin(list(config.tracked_wallets))
         self._config_changed.set()
+        if config.paused == self._paused_seen:
+            return
+        # A global pause must take effect now, not at the next loop tick: drop
+        # every market subscription and release every focus socket immediately,
+        # and re-establish them on resume.
+        self._paused_seen = config.paused
+        if not self._running:
+            return
+        try:
+            await self._apply_market_subscriptions()
+            await self._apply_focus_slate()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "Could not apply the pause state to the feeds",
+                extra={"paused": config.paused},
+            )
+        log.info("Global pause applied" if config.paused else "Global pause lifted")
 
     def price_of(self, coin: str) -> float | None:
         return self._prices.get(coin.upper())
@@ -270,7 +296,7 @@ class WhaleEngine:
 
     def _desired_market_subscriptions(self) -> list[dict[str, Any]]:
         cfg = self.config
-        if not cfg.monitoring_enabled:
+        if not cfg.monitoring_active:
             return []
         subs: list[dict[str, Any]] = [{"type": "allMids"}]
         for coin in self._universe:
@@ -345,7 +371,7 @@ class WhaleEngine:
     def _on_trade(self, trade: Trade) -> None:
         self.trades_seen += 1
         cfg = self.config
-        if not cfg.monitoring_enabled or not cfg.enable_trade_detector:
+        if not cfg.monitoring_active or not cfg.enable_trade_detector:
             return
         threshold = cfg.threshold_for("trade")
         notional = trade.notional
@@ -559,6 +585,9 @@ class WhaleEngine:
             return
         if not self.dedup.check(event, self.config.alert_cooldown_seconds):
             return
+        if await self._already_recorded(event):
+            self.duplicate_persisted += 1
+            return
 
         event_id = await self._persist(event)
         if event_id is None:
@@ -575,6 +604,30 @@ class WhaleEngine:
                 await self.alert_callback(event, event_id)
             except Exception:
                 log.exception("Alert callback failed", extra={"event": event.event_type.value})
+
+    async def _already_recorded(self, event: WhaleEvent) -> bool:
+        """Durable duplicate gate, behind the in-memory one.
+
+        ``Deduplicator`` is a bounded TTL cache in RAM, so it forgets across a
+        restart and evicts under pressure — and a redeploy is exactly when the
+        websocket replays its snapshots. ``whale_events.dedup_key`` is the record
+        of what has actually been recorded, so it is consulted before writing.
+
+        A database problem here must not silence detection: on error the answer is
+        "not seen", and the in-memory gate stands alone.
+        """
+        if not event.dedup_key:
+            return False
+        since = utc_now() - timedelta(seconds=IDENTITY_TTL)
+        try:
+            async with self.db.session() as session:
+                return await EventRepository.seen_recently(session, event.dedup_key, since)
+        except Exception:
+            log.debug(
+                "Durable duplicate check unavailable; relying on the in-memory cache",
+                extra={"event": event.event_type.value},
+            )
+            return False
 
     async def _persist(self, event: WhaleEvent) -> int | None:
         try:
@@ -645,6 +698,31 @@ class WhaleEngine:
         position_value = event.numeric("position_value")
         closed = event.event_type is EventType.POSITION_CLOSED
         existing = await PositionRepository.get(session, event.wallet, event.coin)
+
+        # ORDER ≠ POSITION, and an execution side is not a position side: a BUY
+        # is not evidence of a long. Only ``LONG``/``SHORT`` from a
+        # clearinghouseState snapshot may be written here. This is what produced
+        # rows reading "BTC BUY — Notional: N/A": an execution side reached the
+        # positions table without a snapshot behind it.
+        side = event.value("position_side")
+        if side not in POSITION_SIDES:
+            side = event.side if event.side in POSITION_SIDES else None
+        if side is None and existing is not None and existing.side in POSITION_SIDES:
+            # A close whose own snapshot no longer states a side still closes the
+            # row we already verified — the last verified side is the truth.
+            side = existing.side
+        if side is None:
+            self.position_writes_skipped += 1
+            log.debug(
+                "Refusing to write a position with no verified LONG/SHORT side",
+                extra={
+                    "event": event.event_type.value,
+                    "coin": event.coin,
+                    "event_side": event.side,
+                },
+            )
+            return
+
         opened_at = existing.opened_at if existing is not None else None
         if event.event_type is EventType.POSITION_OPENED or opened_at is None:
             opened_at = event.event_time
@@ -656,7 +734,7 @@ class WhaleEngine:
             session,
             event.wallet,
             event.coin,
-            side=event.value("position_side") or event.side,
+            side=side,
             size=size,
             entry_px=event.numeric("entry_px"),
             position_value=position_value,
@@ -694,7 +772,7 @@ class WhaleEngine:
     async def _position_loop(self) -> None:
         while self._running:
             await asyncio.sleep(POSITION_TICK)
-            if not self.config.monitoring_enabled or not self.config.enable_position_detector:
+            if not self.config.monitoring_active or not self.config.enable_position_detector:
                 continue
             try:
                 budget = self.rest.limiter.available
@@ -718,7 +796,7 @@ class WhaleEngine:
         while self._running:
             await asyncio.sleep(ORDER_TICK)
             cfg = self.config
-            if not cfg.monitoring_enabled or not cfg.enable_order_detector:
+            if not cfg.monitoring_active or not cfg.enable_order_detector:
                 continue
             try:
                 budget = self.rest.limiter.available
@@ -751,7 +829,7 @@ class WhaleEngine:
         while self._running:
             await asyncio.sleep(BOOK_TICK)
             cfg = self.config
-            if not cfg.monitoring_enabled or not cfg.enable_book_scanner:
+            if not cfg.monitoring_active or not cfg.enable_book_scanner:
                 continue
             if any(
                 sub.get("type") == "l2Book" for sub in self.market_ws.subscriptions
@@ -781,7 +859,7 @@ class WhaleEngine:
         cfg = self.config
         limit = min(self.env.ws_focus_wallets, MAX_FOCUS_WALLETS)
         wanted: list[str] = []
-        if cfg.monitoring_enabled and cfg.enable_order_detector and limit > 0:
+        if cfg.monitoring_active and cfg.enable_order_detector and limit > 0:
             wanted = self.tracker.focus_slate(limit)
 
         for address in list(self._user_ws):
@@ -865,6 +943,7 @@ class WhaleEngine:
             "running": self._running,
             "uptime_seconds": round(uptime, 1),
             "monitoring_enabled": self.config.monitoring_enabled,
+            "paused": self.config.paused,
             "coins_monitored": list(self._universe),
             "coins_not_monitored": len(self._dropped_coins),
             "trades_seen": self.trades_seen,
@@ -874,6 +953,8 @@ class WhaleEngine:
             "queue_depth": self._queue.qsize(),
             "queue_dropped": self.queue_dropped,
             "persist_errors": self.persist_errors,
+            "duplicate_persisted": self.duplicate_persisted,
+            "position_writes_skipped": self.position_writes_skipped,
             "last_event_at": self.last_event_at.isoformat() if self.last_event_at else None,
             "last_alert_at": self.last_alert_at.isoformat() if self.last_alert_at else None,
             "market_ws": self.market_ws.stats(),

@@ -50,32 +50,104 @@ def magnitude_bucket(value: float) -> int:
 
 
 def identity_key(event: WhaleEvent) -> str:
-    """Strongest available identifier for "this exact observation"."""
-    wallet = (event.wallet or "anon").lower()
-    base = (event.event_type.value, event.coin, wallet, event.side)
+    """Strongest available identifier for "this exact observation".
 
+    **Only feed-derived facts may appear in this key.** Enrichment runs
+    asynchronously, so the same exchange event observed twice a second apart can
+    carry different *derived* attributes on each pass — and the worst offender is
+    :attr:`WhaleEvent.side`, which is the position side once a
+    ``clearinghouseState`` snapshot has landed and the trade side before that
+    (:meth:`WhaleDetector.from_trade`). Including it produced the reported
+    defect: one ETH buy of $8.13M announced twice, one second apart, because the
+    first pass keyed on ``BUY`` and the second on ``LONG``. Same for ``wallet``,
+    which is ``None`` until a participant is resolved.
+
+    So when the exchange gives a unique identifier — ``tid`` for a fill, ``oid``
+    for an order — that identifier *is* the identity, and nothing enrichment can
+    touch is mixed in.
+    """
     if event.event_type is EventType.WHALE_TRADE:
         tid = event.context.get("tid")
         if tid is not None:
-            return _digest(*base, "tid", tid)
-        return _digest(*base, "px", event.value("price"), "sz", event.value("size"),
-                       "t", int(event.event_time.timestamp()))
+            # One fill, one alert. ``role`` distinguishes the taker's event from
+            # the maker's for the same fill and comes straight from the trade
+            # payload, so it cannot drift between observations.
+            return _digest("trade", tid, event.context.get("role"))
+        # No tid (a REST-derived fill): fall back to the immutable trade facts.
+        # ``wallet`` stays in the key — it is read straight from the trade
+        # payload's participants, so two whales trading the same size at the same
+        # instant remain distinct — but ``event.side`` does not, because that is
+        # the field enrichment rewrites. ``trade_side`` is what the feed said.
+        return _digest(
+            "trade",
+            event.coin,
+            (event.wallet or "anon").lower(),
+            event.value("trade_side"),
+            "px", event.value("price"),
+            "sz", event.value("size"),
+            "t", int(event.event_time.timestamp()),
+        )
 
     if event.is_order_event:
-        return _digest(*base, "oid", event.order_id, "status", event.status,
-                       "sz", round(float(event.value("size") or 0.0), 8))
+        # ``oid`` is Hyperliquid's own order identifier: two events with the same
+        # oid *and* the same lifecycle status are the same observation, however
+        # many feeds delivered it. Size is included because a partial fill of the
+        # same still-open order is genuinely new.
+        if event.order_id is not None:
+            return _digest(
+                "order",
+                event.order_id,
+                event.event_type.value,
+                event.status,
+                "sz", round(float(event.value("size") or 0.0), 8),
+            )
+        return _digest(
+            "order",
+            event.event_type.value,
+            event.coin,
+            (event.wallet or "anon").lower(),
+            # An order event's ``side`` is the order's own direction from the
+            # feed, not a position side, so it is stable across observations.
+            event.side,
+            event.status,
+            "px", event.value("price"),
+            "sz", round(float(event.value("size") or 0.0), 8),
+        )
 
     if event.event_type is EventType.BOOK_LEVEL:
-        return _digest(*base, "px", event.value("price"),
-                       "ntl", round(event.notional, -3))
+        # No owner and no identifier — l2Book levels are aggregated — so the
+        # level itself is the identity.
+        return _digest(
+            "book", event.coin, event.side,
+            "px", event.value("price"),
+            "ntl", round(event.notional, -3),
+        )
 
-    # Position events: the quantised state itself is the identity.
+    # Position events: the quantised state itself is the identity. ``side`` here
+    # *is* feed-derived (it comes from the clearinghouseState snapshot), so it
+    # belongs in the key.
     return _digest(
-        *base,
+        "position",
+        event.event_type.value,
+        event.coin,
+        (event.wallet or "anon").lower(),
+        event.side,
         "sz", round(float(event.value("size") or 0.0), 8),
         "pv", round(float(event.value("position_value") or 0.0), 2),
         "entry", event.value("entry_px"),
     )
+
+
+def stable_side(event: WhaleEvent) -> str | None:
+    """The side as the *feed* reported it, ignoring enrichment.
+
+    :attr:`WhaleEvent.side` prefers the position side when one is known, which
+    makes it a moving target between two observations of one trade. Any dedup key
+    must use this instead.
+    """
+    if event.event_type is EventType.WHALE_TRADE:
+        return event.value("trade_side") or event.value("taker_side")
+    return event.side
 
 
 def cooldown_key(event: WhaleEvent) -> str:
@@ -84,7 +156,7 @@ def cooldown_key(event: WhaleEvent) -> str:
         event.event_type.value,
         event.coin,
         (event.wallet or "anon").lower(),
-        event.side,
+        stable_side(event),
         magnitude_bucket(event.notional),
     )
 

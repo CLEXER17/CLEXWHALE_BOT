@@ -202,7 +202,14 @@ class AlertService:
         self.failed = 0
         self.throttled = 0
         self.blocked = 0
+        #: Alerts discarded because no recipient could be resolved. Counted, not
+        #: swallowed: with 400 whale events and "Alerts delivered: 0" this is the
+        #: number that says whether the pipeline stopped at delivery.
+        self.no_recipients = 0
+        #: Alerts not enqueued because the bot was globally paused (/pause).
+        self.paused_drops = 0
         self.last_sent_at: datetime | None = None
+        self._no_recipient_warned_at: datetime | None = None
 
     # ── lifecycle ─────────────────────────────────────────────
     def attach_bot(self, bot: Bot) -> None:
@@ -236,6 +243,12 @@ class AlertService:
         as observed, and so a slow Telegram API can never back-pressure the
         detection pipeline.
         """
+        if self.settings.config.paused:
+            # Global pause: nothing leaves the bot. Counted so /status can say
+            # how much was withheld rather than looking like a silent failure.
+            self.paused_drops += 1
+            return
+
         try:
             text = self.render(event)
         except Exception:
@@ -599,7 +612,30 @@ class AlertService:
 
         recipients = await self._resolve_recipients()
         if not recipients:
-            log.debug("Alert has no recipients", extra={"event": job.event_type})
+            # Every admin has either never opened a chat with the bot or has sent
+            # /stop, and public mode is off or has no subscribers. That is a
+            # legitimate state, but it is also exactly what "411 whale events,
+            # 0 alerts delivered" looks like, so it is counted and said out loud
+            # (at most once a minute, so a busy feed cannot flood the log).
+            self.no_recipients += 1
+            self.dropped += 1
+            now = utc_now()
+            if (
+                self._no_recipient_warned_at is None
+                or (now - self._no_recipient_warned_at).total_seconds() >= 60
+            ):
+                self._no_recipient_warned_at = now
+                log.warning(
+                    "Alert dropped: no recipient resolved. Every admin is either "
+                    "unsubscribed (/stop) or has never opened a chat with the bot, "
+                    "and public mode adds no subscribers.",
+                    extra={
+                        "event": job.event_type,
+                        "no_recipients_total": self.no_recipients,
+                        "admins_known": len(self.admins.admin_ids),
+                        "public_mode": self.settings.config.public_mode,
+                    },
+                )
             return
 
         results: list[tuple[_Recipient, int | None, str | None]] = []
@@ -836,6 +872,8 @@ class AlertService:
             "failed": self.failed,
             "throttled": self.throttled,
             "blocked": self.blocked,
+            "no_recipients": self.no_recipients,
+            "paused_drops": self.paused_drops,
             "recipients": len(self._recipients),
             "threads": len(self._threads),
             "bot_attached": self.bot is not None,

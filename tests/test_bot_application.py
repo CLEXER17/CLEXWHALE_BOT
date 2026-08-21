@@ -19,10 +19,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from telegram import BotCommandScopeChat, BotCommandScopeDefault
 
 from app.bot.application import build_application, post_init
-from app.bot.handlers import COMMANDS, PUBLIC_COMMAND_MENU
+from app.bot.commands import menu_for_role
+from app.bot.handlers import (
+    ADMIN_COMMAND_NAMES,
+    COMMANDS,
+    MAIN_ADMIN_COMMAND_NAMES,
+    PUBLIC_COMMAND_MENU,
+)
 from app.container import AppContainer
+from tests.conftest import MAIN_ADMIN_ID
 
 
 # ── the regression ─────────────────────────────────────────────
@@ -61,15 +69,22 @@ def test_every_command_is_registered(container: AppContainer):
 # ── post_init ──────────────────────────────────────────────────
 
 class _StubBot:
-    """Enough of ``telegram.Bot`` for ``post_init``: identity + set_my_commands."""
+    """Enough of ``telegram.Bot`` for ``post_init``: identity + set_my_commands.
+
+    Records the scope as well as the menu, because the whole point of the scoped
+    publish is *which* menu each audience gets (spec issue 4/14): asserting on
+    the command lists alone would pass even if every audience got the admin menu.
+    """
 
     def __init__(self) -> None:
         self.id = 1234567890
         self.username = "stub_bot"
         self.published: list[Any] = []
+        self.scopes: list[Any] = []
 
     async def set_my_commands(self, commands: Any, **kwargs: Any) -> bool:
         self.published.append(commands)
+        self.scopes.append(kwargs.get("scope"))
         return True
 
 
@@ -83,8 +98,33 @@ async def test_post_init_publishes_the_command_menu(container: AppContainer):
 
     await post_init(application)
 
-    assert application.bot.published == [PUBLIC_COMMAND_MENU]
+    bot = application.bot
+    # The default scope — everyone who has not been given a per-chat menu — sees
+    # only the public commands.
+    assert bot.published[0] == PUBLIC_COMMAND_MENU
+    assert isinstance(bot.scopes[0], BotCommandScopeDefault)
+
+    published = dict(zip(bot.scopes, bot.published))
+    main = next(
+        menu
+        for scope, menu in published.items()
+        if isinstance(scope, BotCommandScopeChat) and scope.chat_id == MAIN_ADMIN_ID
+    )
+    assert menu_for_role(main_admin=True, admin=True) == main
     assert container.alerts.bot is application.bot
+
+
+@pytest.mark.asyncio
+async def test_the_default_menu_leaks_no_admin_command(container: AppContainer):
+    """Issue 4/5: a normal user's command list must not advertise admin controls."""
+    application = _stub_application(container)
+
+    await post_init(application)
+
+    public = {command.command for command in application.bot.published[0]}
+    assert not public & ADMIN_COMMAND_NAMES
+    assert not public & MAIN_ADMIN_COMMAND_NAMES
+    assert {"start", "help", "whales"} <= public
 
 
 @pytest.mark.asyncio
@@ -94,9 +134,10 @@ async def test_post_init_is_idempotent(container: AppContainer):
     application = _stub_application(container)
 
     await post_init(application)
+    first = len(application.bot.published)
     await post_init(application)
 
-    assert len(application.bot.published) == 1
+    assert len(application.bot.published) == first
 
 
 @pytest.mark.asyncio

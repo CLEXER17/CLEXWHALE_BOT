@@ -18,6 +18,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.bot import views
+from app.bot.commands import sync_command_menus
 from app.bot.handlers import admin as admin_cmds
 from app.bot.keyboards import inline
 from app.bot.messages import texts
@@ -66,6 +67,13 @@ _ACTION_CAPABILITY = {
     (inline.CB_ADMIN, "list"): Capability.VIEW_ADMINS,
 }
 
+#: The only buttons that still work while the bot is globally paused: the one
+#: that lifts the pause, and the read-only status that explains it. Everything
+#: else is refused in :func:`on_callback` so no panel can act behind the pause.
+_PAUSE_EXEMPT = frozenset(
+    {(inline.CB_MON, "resume"), (inline.CB_MON, "status"), (inline.CB_PANEL, "open")}
+)
+
 #: Booleans the 🔔 Alert Settings panel may flip. Monitoring and public mode are
 #: deliberately absent — they have their own capabilities and their own panels.
 _ALERT_TOGGLES = frozenset(
@@ -110,6 +118,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             },
         )
         await refuse(update, str(exc))
+        return
+
+    # Checked after authorization, so an unauthorized caller still learns only
+    # that it was refused — not what state the bot is in.
+    if container.settings.config.paused and (area, action) not in _PAUSE_EXEMPT:
+        await refuse(update, texts.paused_notice(admin=actor.is_admin))
         return
 
     await register(update, container)
@@ -198,6 +212,19 @@ async def _monitoring(
     update: Update, container: AppContainer, actor: Actor, action: str
 ) -> None:
     config = container.settings.config
+    if action in ("pause", "resume"):
+        # The global pause is a different switch from `monitoring_enabled`: it is
+        # left untouched here so resuming restores exactly what was configured.
+        target = action == "pause"
+        if config.paused == target:
+            await respond(update, *await views.status_view(container), toast="No change")
+            return
+        await container.settings.set_paused(target, actor.telegram_id)
+        text, keyboard = await views.status_view(container)
+        toast = "Bot paused — /go to resume" if target else "Bot resumed"
+        await respond(update, text, keyboard, toast=toast)
+        return
+
     if action == "toggle":
         target = not config.monitoring_enabled
     elif action == "start":
@@ -337,6 +364,14 @@ async def _admins(
         await respond(update, texts.PROMPT_ADD_ADMIN, inline.cancel_prompt())
         return
 
+    if action == "list":
+        # Its own panel, not a re-render of the admin home this button sits on:
+        # identical content makes Telegram reject the edit ("message is not
+        # modified") and the button looks broken.
+        text, keyboard = await views.admin_roster_view(container, actor)
+        await respond(update, text, keyboard, toast="Co-admin roster")
+        return
+
     if action == "remove":
         text, keyboard = await views.admin_remove_view(container, actor)
         await respond(update, text, keyboard)
@@ -352,6 +387,7 @@ async def _admins(
         container.alerts.invalidate_recipients()
         text, keyboard = await views.admin_home_view(container, actor)
         await respond(update, text, keyboard, toast=f"Removed {target}")
+        await sync_command_menus(context.bot, container, demoted=target)
         await _tell(context, target, texts.demoted_notice())
         return
 

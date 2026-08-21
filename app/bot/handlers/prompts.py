@@ -80,6 +80,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await refuse(update, str(exc))
         return
 
+    if container.settings.config.paused:
+        # A prompt outlives the command that opened it, so a pause can land
+        # between the question and the answer. Drop the prompt rather than apply
+        # a setting change while everything else is frozen.
+        context.user_data.pop("pending", None)
+        await refuse(update, texts.paused_notice(admin=actor.is_admin))
+        return
+
     raw = message.text.strip()
     if raw.lower() in {"cancel", "/cancel"}:
         context.user_data.pop("pending", None)

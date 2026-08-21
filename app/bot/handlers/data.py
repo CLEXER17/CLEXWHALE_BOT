@@ -25,9 +25,13 @@ def _coin_arg(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     return None
 
 
-@requires(Capability.VIEW_WHALES)
+@requires(Capability.VIEW_WHALES, allow_when_paused=True)
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
-    """Admins get the operational panel; users get the signal feed summary."""
+    """Admins get the operational panel; users get the signal feed summary.
+
+    Exempt from the global pause: this is the one view that explains *why*
+    everything else is refused, and it changes nothing.
+    """
     container = get_container(context)
     if actor.is_admin:
         text, keyboard = await views.status_view(container)

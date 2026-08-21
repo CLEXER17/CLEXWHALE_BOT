@@ -1,33 +1,39 @@
 # NOW
 
 CURRENT TASK:
-Task B: admin UI + wallet display + data integrity audit (17 issues), then
-Task C: global /pause and /go.
+Task B (admin UI + wallet display + data integrity, 17 issues) and Task C
+(global /pause + /go) are both complete, tested and green. Nothing is in flight.
 
 CURRENT FILE:
-app/bot/views.py  (whale_list / order_list / position_list / wallet_list still
-call short_wallet — that is the `0x3200...c407` truncation seen live)
+none — last touched app/bot/commands.py (PUBLIC_COMMAND_MENU) and the two new
+test files.
 
 CURRENT FUNCTION:
-views.whale_list -> app/utils/formatting.py::short_wallet callers
+none.
 
 LAST COMPLETED:
-Order/position state fix: app/whale/lifecycle.py + may_modify_position gate in
-engine._persist + realised PnL from closedPnl + distance wording. 426 passed.
+The 18+ named regression tests: tests/test_admin_ui_integrity.py (32 tests,
+issues 1-14) and tests/test_global_pause.py (15 tests, Task C). They caught one
+real bug: /recent was published in the admin command scope while its handler
+required only VIEW_WHALES and /help advertised it publicly — fixed by moving
+`recent` into PUBLIC_COMMAND_MENU in app/bot/commands.py. Docs updated:
+.agent/TEST_STATUS.md (474 totals, per-module table, defect 4) and
+.agent/CHANGELOG.md (new top entry). Committed and pushed.
 
 CURRENT PROBLEM:
-Task B issue 1 needs the full 42-char address in list views; callback_data has a
-64-byte limit, so lists must show the full address while buttons carry an
-internal id that resolves to it (issue 12).
+none.
 
 NEXT ACTION:
-1 grep short_wallet callers in app/bot/views.py, replace with full <code> address
-2 co-admin list button: trace callback_data -> handler -> permission -> repo
-3 Telegram command scopes (BotCommandScope*) so users never see admin commands
-4 duplicate whale events: event identity from exchange oid/tid, not output dedup
-5 threshold semantics ($4.60M shown under a $5M threshold) + alerts-delivered 0
-6 /pause + /go global gate
-Then item 3 TP/SL fetch, item 5 liquidation alert, item 6 durability log.
+1 feature item 3 — TP/SL populate: relax the frontendOpenOrders weight-20 budget
+  gate in WhaleEngine._enrich for a forced enrich (available > 60 when force,
+  keep > 200 routine) so PositionContext.orders_known becomes True
+2 feature item 5 — liquidation alert: new EventType + ValueKind.LIQUIDATION_VALUE
+  + THRESHOLD_CLASS/HEADERS/DETECTOR_OF_EVENT entries + detector.from_liquidation
+  + emit from WhaleEngine._process_liquidation + a dedup.identity_key branch
+3 feature item 6 — startup line distinguishing durable Postgres from the
+  ephemeral SQLite fallback
+4 remaining docs: ARCHITECTURE/SECURITY notes on command scopes, README margin gate
+User-owned: rotate BOT_TOKEN via @BotFather /revoke, update the Railway variable.
 
 RELEVANT TEST:
-./.venv/Scripts/python.exe -m pytest -q
+./.venv/Scripts/python.exe -m pytest -q     -> 474 passed, 0 failed, 0 skipped

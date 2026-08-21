@@ -26,7 +26,7 @@ from app.utils.formatting import (
     fmt_time,
     fmt_usd,
     fmt_usd_full,
-    short_wallet,
+    wallet_code,
 )
 
 # ── access control ─────────────────────────────────────────────
@@ -300,7 +300,20 @@ def status_panel(config: RuntimeConfig, stats: Mapping[str, Any]) -> str:
     lines = [
         "📡 <b>MONITORING STATUS</b>",
         DIVIDER,
-        f"<b>Monitoring:</b> {'🟢 ON' if config.monitoring_enabled else '🔴 OFF'}",
+    ]
+    if config.paused:
+        # First line, before anything else: while paused every figure below is
+        # frozen, and a reader who misses that will read "Monitoring: ON, feed
+        # disconnected" as a fault.
+        lines += [
+            "⏸️ <b>GLOBALLY PAUSED</b> — send <code>/go</code> to resume.",
+            "<i>Feeds are down and alerts are withheld by choice, not by fault. "
+            "The counters below are frozen where the pause found them.</i>",
+            DIVIDER,
+        ]
+    lines += [
+        f"<b>Monitoring:</b> {'🟢 ON' if config.monitoring_enabled else '🔴 OFF'}"
+        + ("  <i>(overridden by pause)</i>" if config.paused else ""),
         f"<b>Hyperliquid feed:</b> {'🟢 connected' if connected else '🔴 disconnected'}",
         f"<b>Access:</b> {'🌐 PUBLIC' if config.public_mode else '🔒 PRIVATE'}",
         f"<b>Threshold:</b> {fmt_usd_full(config.min_whale_value)}",
@@ -315,6 +328,16 @@ def status_panel(config: RuntimeConfig, stats: Mapping[str, Any]) -> str:
         f"Live order streams: <b>{len(engine.get('focus_wallets') or [])}"
         f"/{engine.get('focus_cap', 0)}</b>",
     ]
+
+    if alerts.get("paused_drops"):
+        lines.append(f"Alerts withheld while paused: <b>{alerts['paused_drops']:,}</b>")
+    if alerts.get("no_recipients"):
+        # Issue 8: "0 delivered" must never be a silent state.
+        lines.append(
+            f"⚠️ Alerts with no recipient: <b>{alerts['no_recipients']:,}</b>"
+            " — every admin is unsubscribed (/start to re-subscribe) or has never "
+            "opened a chat with the bot."
+        )
 
     reconnects = market.get("reconnects")
     if reconnects:
@@ -348,6 +371,58 @@ def monitoring_stopped() -> str:
         "Alerts are paused. Hyperliquid data is still being read so state stays "
         "current, and nothing already recorded is lost."
     )
+
+
+# ── global pause / resume ──────────────────────────────────────
+def paused_confirmation() -> str:
+    """What /pause reports back.
+
+    Deliberately spells out that this is wider than /stopmonitor, because the two
+    are easy to confuse and only one of them stops the bot answering commands.
+    """
+    return "\n".join(
+        [
+            "⏸️ <b>BOT PAUSED</b>",
+            DIVIDER,
+            "Everything is stopped:",
+            "• Hyperliquid feeds disconnected — no trades, positions, orders or books",
+            "• no detection, no alerts (anything detected meanwhile is discarded)",
+            "• every command except <code>/go</code> is refused",
+            DIVIDER,
+            "Nothing is lost. Settings, coins, watched wallets, admins and recorded "
+            "history are untouched, and the pause survives a redeploy.",
+            "Send <code>/go</code> to resume.",
+        ]
+    )
+
+
+def resumed_confirmation(was_paused: bool) -> str:
+    """What /go reports back. ``was_paused`` is False if it was already running."""
+    if not was_paused:
+        return "▶️ <b>Already running.</b>\nThe bot was not paused; nothing changed."
+    return "\n".join(
+        [
+            "▶️ <b>BOT RESUMED</b>",
+            DIVIDER,
+            "Feeds are reconnecting and commands are open again. The monitoring "
+            "switch is whatever it was before the pause — the status below is "
+            "authoritative.",
+        ]
+    )
+
+
+def paused_notice(*, admin: bool = False) -> str:
+    """The refusal every non-exempt handler gets while paused.
+
+    An admin is told how to lift it; a normal user is not, because /go is an
+    admin control and naming it would advertise a privileged command (issue 5).
+    """
+    if admin:
+        return (
+            "⏸️ <b>The bot is paused.</b>\n"
+            "Send <code>/go</code> to resume. Only <code>/go</code> works until then."
+        )
+    return "⏸️ <b>The bot is paused.</b>\nAn administrator has stopped it. Try again later."
 
 
 # ── public mode (spec §11) ─────────────────────────────────────
@@ -392,6 +467,45 @@ def admin_list(entries: Sequence[Mapping[str, Any]], main_admin_id: int) -> str:
     return "\n".join(lines)
 
 
+def admin_roster(entries: Sequence[Mapping[str, Any]], main_admin_id: int) -> str:
+    """The 📋 List Co-Admins panel.
+
+    Deliberately *not* :func:`admin_list`. The button lives on the admin panel,
+    which already renders ``admin_list``; answering it with the same text made
+    Telegram reject the edit as "message is not modified", so the button looked
+    dead. This view carries what the roster is actually for — who granted each
+    Co-Admin, and when.
+    """
+    co_admins = [e for e in entries if e.get("role") != "MAIN_ADMIN"]
+    lines = ["📋 <b>CO-ADMIN ROSTER</b>", DIVIDER]
+    main = next((e for e in entries if e.get("role") == "MAIN_ADMIN"), None)
+    main_id = main["telegram_id"] if main else main_admin_id
+    lines.append(f"👑 <b>Main Admin</b> — <code>{main_id}</code>")
+    if main and main.get("username"):
+        lines.append(f"   @{escape_html(str(main['username']))}")
+    lines.append("")
+    if not co_admins:
+        lines.append("No Co-Admin has been added yet.")
+    for index, entry in enumerate(co_admins, start=1):
+        telegram_id = entry["telegram_id"]
+        username = entry.get("username")
+        lines.append(f"🛡 <b>Co-Admin {index}</b> — <code>{telegram_id}</code>")
+        if username:
+            lines.append(f"   @{escape_html(str(username))}")
+        added_by = entry.get("added_by")
+        if added_by:
+            lines.append(f"   added by <code>{added_by}</code>")
+        created_at = entry.get("created_at")
+        if created_at:
+            lines.append(f"   added {fmt_time(created_at)} ({fmt_ago(created_at)})")
+    lines += [
+        DIVIDER,
+        f"Co-Admins: <b>{len(co_admins)}</b> (no limit)",
+        "A Co-Admin cannot add, remove or promote administrators.",
+    ]
+    return "\n".join(lines)
+
+
 def co_admin_added(telegram_id: int) -> str:
     """Spec §15 confirmation."""
     return "\n".join(
@@ -429,12 +543,37 @@ def demoted_notice() -> str:
 
 
 # ── settings (spec §27) ────────────────────────────────────────
+def _threshold_overrides(config: RuntimeConfig) -> str | None:
+    """Name the per-class gates only when one actually differs from the base."""
+    labels = {
+        "trade": "trades",
+        "position": "positions",
+        "position_delta": "position changes",
+        "order": "orders",
+    }
+    base = float(config.min_whale_value)
+    differing = [
+        f"{labels[name]} {fmt_usd_full(value)}"
+        for name, value in config.effective_thresholds.items()
+        if abs(value - base) > 0.005
+    ]
+    return " · ".join(differing) if differing else None
+
+
 def settings_panel(config: RuntimeConfig) -> str:
+    overrides = _threshold_overrides(config)
     return "\n".join(
         [
             "⚙️ <b>SETTINGS</b>",
             DIVIDER,
-            f"💰 <b>Minimum Whale Value:</b> {fmt_usd_full(config.min_whale_value)}",
+            *(
+                ["⏸️ <b>Globally paused</b> — <code>/go</code> to resume.", DIVIDER]
+                if config.paused
+                else []
+            ),
+            f"💰 <b>Minimum Whale Value:</b> {fmt_usd_full(config.min_whale_value)}"
+            " <i>(applies at ≥)</i>",
+            *([f"   ↳ per-class overrides: {overrides}"] if overrides else []),
             "🏦 <b>Minimum Margin:</b> "
             + (fmt_usd_full(config.min_margin_value) if config.margin_gate_enabled else "off"),
             f"🪙 <b>Monitored Coins:</b> {escape_html(config.coin_label)}",
@@ -563,6 +702,40 @@ def diagnostics_panel(health: Mapping[str, Any], stats: Mapping[str, Any]) -> st
 
 
 # ── list views (spec §12 / §20 / §28) ──────────────────────────
+def _threshold_footer(config: RuntimeConfig, *classes: str) -> list[str]:
+    """Explain, per event class, the gate a row had to pass.
+
+    Task "ADMIN UI + DATA INTEGRITY" issue 7: a single ``Threshold:`` line over
+    a list of historical rows is ambiguous in two ways at once — the thresholds
+    are *per class* (an order can have a lower gate than a position), and the
+    rows were recorded under whatever threshold was in force at the time, which
+    an admin may have raised since. Both are stated instead of assumed.
+    """
+    labels = {
+        "trade": "executed trades",
+        "position": "positions",
+        "position_delta": "position changes",
+        "order": "resting orders",
+    }
+    effective = config.effective_thresholds
+    shown = [c for c in classes if c in effective] or list(effective)
+    lines = ["<b>Alert thresholds</b> (an event alerts at <b>≥</b> its class threshold):"]
+    lines += [
+        f"• {labels.get(name, name)} {fmt_usd_full(effective[name])}"
+        for name in shown
+    ]
+    if config.margin_gate_enabled:
+        lines.append(
+            f"• plus margin at risk ≥ {fmt_usd_full(config.min_margin_value)} "
+            "for events carrying a position"
+        )
+    lines.append(
+        "<i>Rows above are historical: each passed the threshold in force when it "
+        "was detected, which may be lower than the current one.</i>"
+    )
+    return lines
+
+
 def whale_list(rows: Sequence[Any], config: RuntimeConfig) -> str:
     if not rows:
         return _empty(
@@ -578,16 +751,19 @@ def whale_list(rows: Sequence[Any], config: RuntimeConfig) -> str:
             f"{badge} <b>{escape_html(row.coin)}</b> {escape_html(side)} "
             f"{fmt_usd(row.notional)} · {fmt_ago(row.event_time)}"
         )
-        detail = []
         if row.wallet:
-            detail.append(f"<code>{escape_html(short_wallet(row.wallet))}</code>")
+            # Complete address on its own line: long enough that sharing the
+            # line with other detail would wrap unpredictably, and it is the
+            # one field the reader needs to copy.
+            lines.append(f"   👤 {wallet_code(row.wallet)}")
+        detail = []
         if row.entry_px:
             detail.append(f"entry {fmt_price(row.entry_px)}")
         if row.leverage:
             detail.append(f"{row.leverage:g}x")
         if detail:
             lines.append("   " + " · ".join(detail))
-    lines += [DIVIDER, f"Threshold: {fmt_usd_full(config.min_whale_value)}"]
+    lines += [DIVIDER, *_threshold_footer(config)]
     return "\n".join(lines)
 
 
@@ -606,16 +782,18 @@ def order_list(rows: Sequence[Any], config: RuntimeConfig) -> str:
             f"{badge} <b>{escape_html(row.coin)}</b> {escape_html(side)} "
             f"{fmt_usd(row.notional)} @ {fmt_price(row.limit_px)}"
         )
-        detail = [f"status {escape_html(str(row.status or 'open'))}"]
         if row.wallet:
-            detail.append(f"<code>{escape_html(short_wallet(row.wallet))}</code>")
+            lines.append(f"   👤 {wallet_code(row.wallet)}")
+        detail = [f"status {escape_html(str(row.status or 'open'))}"]
         if row.placed_at:
             detail.append(f"placed {fmt_ago(row.placed_at)}")
         lines.append("   " + " · ".join(detail))
     lines += [
         DIVIDER,
-        "<i>Resting orders only. Hyperliquid does not publish a global feed of",
-        "every order, so this covers wallets the monitor is enriching.</i>",
+        "<i>Resting orders only — an order is not a position. Hyperliquid does",
+        "not publish a global feed of every order, so this covers wallets the",
+        "monitor is enriching.</i>",
+        *_threshold_footer(config, "order"),
     ]
     return "\n".join(lines)
 
@@ -635,9 +813,9 @@ def position_list(rows: Sequence[Any], config: RuntimeConfig) -> str:
             f"{badge} <b>{escape_html(row.coin)}</b> {escape_html(side)} "
             f"{fmt_usd(row.position_value)}"
         )
-        detail = []
         if row.wallet:
-            detail.append(f"<code>{escape_html(short_wallet(row.wallet))}</code>")
+            lines.append(f"   👤 {wallet_code(row.wallet)}")
+        detail = []
         if row.entry_px:
             detail.append(f"entry {fmt_price(row.entry_px)}")
         if row.leverage:
@@ -646,9 +824,19 @@ def position_list(rows: Sequence[Any], config: RuntimeConfig) -> str:
             detail.append(f"liq {fmt_price(row.liquidation_px)}")
         if detail:
             lines.append("   " + " · ".join(detail))
+        if row.position_value is None or side not in ("LONG", "SHORT"):
+            # Never invent a notional. A row can only look like this if it was
+            # written before a clearinghouseState snapshot confirmed the
+            # position — say so rather than dressing it up.
+            lines.append(
+                "   ℹ️ no confirmed clearinghouseState snapshot for this row — "
+                "notional unverified"
+            )
     lines += [
         DIVIDER,
-        "<i>Snapshots from clearinghouseState for wallets under observation.</i>",
+        "<i>Snapshots from clearinghouseState for wallets under observation.",
+        "Liquidation prices are Hyperliquid's own figures; blank means the",
+        "exchange did not publish one.</i>",
     ]
     return "\n".join(lines)
 
@@ -658,14 +846,14 @@ def wallet_list(tracked: Sequence[str], top: Sequence[Mapping[str, Any]]) -> str
     lines = ["🐋 <b>WHALE WALLETS</b>", DIVIDER]
     if tracked:
         lines.append("<b>Watched</b>")
-        lines += [f"• <code>{escape_html(short_wallet(address))}</code>" for address in tracked]
+        lines += [f"• {wallet_code(address)}" for address in tracked]
         lines.append("")
     if top:
         lines.append("<b>Most active recently</b>")
         for entry in top:
             coins = ", ".join(str(coin) for coin in (entry.get("coins") or [])[:3])
             lines.append(
-                f"• <code>{escape_html(short_wallet(str(entry.get('address'))))}</code> — "
+                f"• {wallet_code(str(entry.get('address')))} — "
                 f"{entry.get('trades', 0)} trades · {fmt_usd(entry.get('volume'))}"
                 + (f" · {escape_html(coins)}" if coins else "")
             )
