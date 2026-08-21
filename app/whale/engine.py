@@ -49,12 +49,13 @@ from app.hyperliquid.models import AccountState, L2Book, OpenOrder, OrderUpdate,
 from app.hyperliquid.rest import HyperliquidREST
 from app.hyperliquid.websocket import HyperliquidWebSocket
 from app.services.settings_service import RuntimeConfig, SettingsService
-from app.utils.formatting import utc_now
+from app.utils.formatting import DataPoint, utc_now
 from app.utils.logging import get_logger
 from app.whale.dedup import Deduplicator
 from app.whale.detector import OrderState, WhaleDetector
 from app.whale.events import EventType, WhaleEvent
 from app.whale.filters import WhaleFilter
+from app.whale.lifecycle import may_modify_position
 from app.whale.tracker import WalletTracker, order_state_from_open_order
 
 log = get_logger(__name__)
@@ -76,6 +77,9 @@ BOOK_TICK = 30.0
 
 #: One connection is reserved for the market feed; keep one spare.
 MAX_FOCUS_WALLETS = min(WS_UNIQUE_USER_HARD_CAP, MAX_WS_CONNECTIONS - 2)
+
+#: Cap on the pending realised-PnL map (wallet+coin → summed ``closedPnl``).
+REALIZED_PNL_MAX = 500
 
 
 @dataclass(slots=True)
@@ -116,6 +120,9 @@ class WhaleEngine:
         self._user_ws: dict[str, HyperliquidWebSocket] = {}
 
         self._prices: dict[str, float] = {}
+        #: (wallet, coin) → summed ``closedPnl`` awaiting the next close. Only
+        #: the per-user fills feed populates this, so it covers the focus slate.
+        self._realized_pnl: dict[tuple[str, str], float] = {}
         self._universe: tuple[str, ...] = ()
         self._known_coins: set[str] = set()
         self._volumes: dict[str, float] = {}
@@ -302,9 +309,38 @@ class WhaleEngine:
             # Liquidation detail is only exposed per user; surface it as a fill.
             fills = parser.parse_fills(data.get("fills"))
             for fill in fills:
+                self._record_realized_pnl(wallet, fill)
                 if fill.is_liquidation:
                     self._offer(_Job("liquidation", fill, wallet=wallet))
             return
+
+    def _record_realized_pnl(self, wallet: str, fill: Any) -> None:
+        """Accumulate Hyperliquid's own ``closedPnl`` for one wallet+coin.
+
+        This is the only *realised* PnL the API offers, and it arrives only on
+        the per-user fills feed — so it exists for the focus slate and for
+        nothing else. It is consumed by the next close of that wallet+coin and
+        then discarded. When it is absent the alert says so; nothing is inferred.
+        """
+        closed_pnl = getattr(fill, "closed_pnl", None)
+        if not wallet or closed_pnl is None:
+            return
+        key = (wallet.lower(), fill.coin)
+        self._realized_pnl[key] = self._realized_pnl.get(key, 0.0) + float(closed_pnl)
+        while len(self._realized_pnl) > REALIZED_PNL_MAX:
+            self._realized_pnl.pop(next(iter(self._realized_pnl)))
+
+    def _attach_realized_pnl(self, event: WhaleEvent) -> None:
+        """Give a close its verified realised PnL, if the fills feed provided one."""
+        if not event.wallet:
+            return
+        value = self._realized_pnl.pop((event.wallet.lower(), event.coin), None)
+        if value is None:
+            return
+        event.set(
+            "realized_pnl",
+            DataPoint.confirmed(value, "sum of closedPnl reported on this wallet's fills"),
+        )
 
     def _on_trade(self, trade: Trade) -> None:
         self.trades_seen += 1
@@ -471,6 +507,8 @@ class WhaleEngine:
                 min_notional=prefilter,
             )
             if event is not None:
+                if event.event_type is EventType.POSITION_CLOSED:
+                    self._attach_realized_pnl(event)
                 await self._emit(event)
 
     async def _ingest_open_orders(self, wallet: str, orders: list[OpenOrder]) -> None:
@@ -556,7 +594,10 @@ class WhaleEngine:
                     )
                     if event.is_order_event:
                         await self._persist_order(session, event)
-                    elif event.is_position_event or event.event_type is EventType.WHALE_TRADE:
+                    elif may_modify_position(event):
+                        # Only verified position data writes position state: an
+                        # order event never does, and a bare execution with no
+                        # snapshot behind it never does either.
                         await self._persist_position(session, event)
                 return int(row.id)
         except Exception:

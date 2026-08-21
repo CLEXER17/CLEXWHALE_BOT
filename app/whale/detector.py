@@ -210,6 +210,18 @@ class WhaleDetector:
         event.set("position_size", DataPoint.confirmed(position.abs_size))
         event.set("position_value", DataPoint.confirmed(position.position_value))
         event.set("entry_px", DataPoint.confirmed(position.entry_px))
+        # How far the mark has travelled from the entry. Kept separate from
+        # ``distance_pct`` (which measures an *order* price against the mark) so
+        # the two can never be printed under the same label.
+        current_px = self.current_price(event.coin)
+        if current_px and position.entry_px:
+            event.set(
+                "entry_distance_pct",
+                DataPoint.estimated(
+                    pct_distance(current_px, position.entry_px),
+                    "mark price against the position's entry price",
+                ),
+            )
         event.set(
             "liquidation_px",
             DataPoint.confirmed(position.liquidation_px)
@@ -381,8 +393,24 @@ class WhaleDetector:
             event.set("previous_position_value", DataPoint.confirmed(before.position_value))
         if event_type is EventType.POSITION_CLOSED:
             event.set("closed_position_value", DataPoint.confirmed(before.notional if before else None))
-            if before is not None:
-                event.set("final_unrealized_pnl", DataPoint.confirmed(before.unrealized_pnl))
+            if before is not None and before.unrealized_pnl is not None:
+                # The last unrealised PnL we observed before the position went to
+                # zero. It is *not* the realised result: the close may have
+                # happened at a different price, and fees are not included. It is
+                # therefore labelled an estimate, and the renderer says "(est.)".
+                event.set(
+                    "final_unrealized_pnl",
+                    DataPoint.estimated(
+                        before.unrealized_pnl,
+                        "last observed unrealised PnL before the position closed; "
+                        "not the realised result",
+                    ),
+                )
+            if before is None:
+                event.set(
+                    "historical_position",
+                    DataPoint.unavailable("no pre-close snapshot of this position was observed"),
+                )
 
         self._attach_position(event, ctx)
         self._attach_market(event, after.entry_px if after else (before.entry_px if before else None))

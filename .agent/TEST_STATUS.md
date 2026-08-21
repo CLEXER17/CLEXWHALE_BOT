@@ -19,12 +19,12 @@ required.
 
 | | |
 |---|---|
-| **TOTAL** | **392** |
-| **PASSED** | **392** |
+| **TOTAL** | **426** |
+| **PASSED** | **426** |
 | **FAILED** | **0** |
 | **SKIPPED** | **0** |
 | xfailed / errors | 0 |
-| Wall time | 33.45 s |
+| Wall time | 26.85 s |
 
 ## Per module (each run on its own)
 
@@ -38,10 +38,11 @@ required.
 | `tests/test_detector_positions.py` | 23 | 23 passed | 0.03 s |
 | `tests/test_detector_trades.py` | 17 | 17 passed | 0.03 s |
 | `tests/test_engine_pipeline.py` | 22 | 22 passed | 7.87 s |
-| `tests/test_filters.py` | 19 | 19 passed | 0.03 s |
+| `tests/test_filters.py` | 28 | 28 passed | 0.05 s |
+| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.26 s |
 | `tests/test_permissions.py` | 48 | 48 passed | 4.88 s |
 | `tests/test_resilience.py` | 50 | 50 passed | 4.84 s |
-| `tests/test_telegram_handlers.py` | 61 | 61 passed | 6.33 s |
+| `tests/test_telegram_handlers.py` | 66 | 66 passed | 6.33 s |
 
 Support files (no tests of their own): `tests/conftest.py` (fixtures, fake
 Telegram objects, environment scrubbing), `tests/factories.py` (builders for
@@ -55,6 +56,7 @@ Hyperliquid shapes).
 | LONG position detection | `test_detector_positions.py`, `test_engine_pipeline.py::test_a_raw_trades_frame_becomes_one_formatted_whale_alert` |
 | SHORT position detection | `test_detector_positions.py`, `test_engine_pipeline.py::test_a_sell_aggressor_on_a_short_renders_as_a_short` |
 | Limit order detection | `test_detector_orders.py` |
+| Order ≠ position separation | `test_order_position_separation.py` (a resting BUY/SELL never becomes LONG/SHORT; a fill or cancellation never moves position state; a close is measured from the last verified non-zero snapshot) |
 | Order cancellation detection | `test_detector_orders.py` (cancel vs fill vs exchange-initiated cancel) |
 | Coin filtering | `test_filters.py`, `test_engine_pipeline.py::test_a_coin_outside_the_filter_produces_nothing`, `…::test_an_unknown_coin_is_not_alerted` |
 | Duplicate prevention | `test_dedup.py`, `test_engine_pipeline.py::test_the_same_trade_id_arriving_twice_alerts_once`, `…::test_a_second_similar_trade_is_held_by_the_cooldown`, `…::test_a_redeploy_does_not_replay_the_last_alert` |

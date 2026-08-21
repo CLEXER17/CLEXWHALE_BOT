@@ -57,6 +57,7 @@ from app.utils.formatting import (
 from app.utils.logging import get_logger
 from app.utils.ratelimit import TokenBucket
 from app.whale.events import EventType, ValueKind, WhaleEvent
+from app.whale.lifecycle import ORDER_SIDES
 
 log = get_logger(__name__)
 
@@ -109,6 +110,21 @@ def _short_reason(note: str | None) -> str:
         return ""
     text = note.strip()
     return text if len(text) <= 60 else text[:57] + "..."
+
+
+def _distance_text(pct: float | None) -> str:
+    """``+1.37% above`` / ``-0.36% below`` — never a bare sign.
+
+    An order price sitting above or below the mark means opposite things for a
+    buyer and a seller, so the word is always spelled out.
+    """
+    if pct is None:
+        return "N/A"
+    if pct > 0:
+        return f"{fmt_pct(pct)} above"
+    if pct < 0:
+        return f"{fmt_pct(pct)} below"
+    return "at the mark price"
 
 
 def _is_missing_reply(exc: BadRequest) -> bool:
@@ -306,9 +322,16 @@ class AlertService:
         current = event.point("current_px")
         if current.available:
             lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
-        distance = event.point("distance_pct")
-        if distance.available:
-            lines.append(f"📐 <b>Distance:</b> {fmt_pct(distance.value)}")
+        # A *position* distance is measured against its entry, and is labelled
+        # "From Entry" so it can never be read as an order's distance from the
+        # mark. For a bare execution with no position we say what it really is.
+        entry_distance = event.point("entry_distance_pct")
+        if entry_distance.available:
+            lines.append(f"📐 <b>From Entry:</b> {fmt_pct(entry_distance.value)}")
+        elif event.event_type is EventType.WHALE_TRADE and event.has("distance_pct"):
+            lines.append(
+                f"📐 <b>Fill vs mark:</b> {_distance_text(event.numeric('distance_pct'))}"
+            )
 
         if live_position or event.has("take_profit_px") or event.has("stop_loss_px"):
             lines.append(self._tpsl_line(event, "take_profit_px", "🎯", "TP"))
@@ -320,13 +343,13 @@ class AlertService:
         if size.available:
             lines.append(f"📦 <b>Size:</b> {fmt_size(size.value)} {coin}")
 
-        pnl = event.point("unrealized_pnl")
         if event.event_type is EventType.POSITION_CLOSED:
-            pnl = event.point("final_unrealized_pnl")
-        if pnl.available:
-            label = "Final PnL" if event.event_type is EventType.POSITION_CLOSED else "Unrealised"
-            emoji = "🟢" if float(pnl.value) >= 0 else "🔴"
-            lines.append(f"{emoji} <b>{label}:</b> {fmt_usd(pnl.value)}{marker(pnl)}")
+            lines.append(self._closed_pnl_line(event))
+        else:
+            pnl = event.point("unrealized_pnl")
+            if pnl.available:
+                emoji = "🟢" if float(pnl.value) >= 0 else "🔴"
+                lines.append(f"{emoji} <b>Unrealised:</b> {fmt_usd(pnl.value)}{marker(pnl)}")
 
         margin = event.point("margin_used")
         if margin.available:
@@ -341,8 +364,14 @@ class AlertService:
             )
 
         if not has_context:
-            reason = _short_reason(position_value.note) or "wallet not enriched yet"
-            lines.append(f"ℹ️ <b>Position data:</b> unavailable — {escape_html(reason)}")
+            if event.event_type is EventType.POSITION_CLOSED:
+                # Entry, leverage, liquidation and TP/SL belong to a position
+                # that no longer exists. We do not reconstruct them, and we do
+                # not print a wall of N/A pretending we tried.
+                lines.append("ℹ️ Historical position details unavailable")
+            else:
+                reason = _short_reason(position_value.note) or "wallet not enriched yet"
+                lines.append(f"ℹ️ <b>Position data:</b> unavailable — {escape_html(reason)}")
 
         lines.append(DIVIDER)
         lines.append(self._trader_line(event))
@@ -397,7 +426,7 @@ class AlertService:
             lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
         distance = event.point("distance_pct")
         if distance.available:
-            lines.append(f"📐 <b>Distance:</b> {fmt_pct(distance.value)}")
+            lines.append(f"📐 <b>Distance:</b> {_distance_text(float(distance.value))}")
 
         lines.append(f"📌 <b>Status:</b> {escape_html(self._status_label(event))}")
 
@@ -443,13 +472,32 @@ class AlertService:
         if current.available:
             lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
         if distance.available:
-            lines.append(f"📐 <b>Distance:</b> {fmt_pct(distance.value)}")
+            lines.append(f"📐 <b>Distance:</b> {_distance_text(float(distance.value))}")
         lines.append(f"👤 <b>Trader:</b> N/A — {escape_html(_short_reason(attribution.note))}")
         lines.append(f"🕐 {fmt_time(event.event_time)}")
         lines.append(DIVIDER)
         return "\n".join(lines)
 
     # -- line builders --
+    def _closed_pnl_line(self, event: WhaleEvent) -> str:
+        """PnL for a position that no longer exists.
+
+        Three cases, never merged: Hyperliquid's own realised figure
+        (``closedPnl`` from the fills feed) is reported as realised; the last
+        unrealised PnL we saw before the position went to zero is reported as an
+        estimate, because the close may have happened at a different price and
+        fees are not included; and if we have neither we say ``N/A``.
+        """
+        realized = event.point("realized_pnl")
+        if realized.available:
+            emoji = "🟢" if float(realized.value) >= 0 else "🔴"
+            return f"{emoji} <b>Realized PnL:</b> {fmt_usd(realized.value)}{marker(realized)}"
+        estimate = event.point("final_unrealized_pnl")
+        if estimate.available:
+            emoji = "🟢" if float(estimate.value) >= 0 else "🔴"
+            return f"{emoji} <b>Final PnL (est.):</b> {fmt_usd(estimate.value)}"
+        return "⚪ <b>Final PnL:</b> N/A"
+
     def _side_line(self, event: WhaleEvent) -> str:
         side = (event.side or "").upper()
         badge = SIDE_BADGES.get(side)
@@ -458,7 +506,17 @@ class AlertService:
         return f"↔️ {escape_html(side)}" if side else "↔️ direction N/A"
 
     def _order_side_line(self, event: WhaleEvent) -> str:
+        """``🟢 BUY LIMIT`` / ``🔴 SELL LIMIT`` — never LONG or SHORT.
+
+        An order's side is a book side. A resting SELL can belong to a wallet
+        with no position, a long that is taking profit, or a short that is
+        adding, so translating it into a position direction would be a guess.
+        Anything that is not literally BUY or SELL is refused rather than
+        rendered, which is what stops a position word from ever leaking here.
+        """
         side = (event.side or "").upper()
+        if side not in ORDER_SIDES:
+            side = ""
         emoji = "🟢" if side == "BUY" else "🔴" if side == "SELL" else "↔️"
         order_type = event.value("order_type")
         kind = str(order_type).upper() if order_type else ("TRIGGER" if event.has("trigger_px") else "LIMIT")

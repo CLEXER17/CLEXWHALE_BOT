@@ -4,6 +4,58 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-21 — Order state and position state are no longer allowed to bleed
+
+An order and a position are separate objects with separate lifecycles. Live
+alerts showed the two blurring together: a resting `SELL LIMIT` read as evidence
+of a short, a bare `📐 Distance` printed by three different renderers measuring
+three different things, and a closed position's last unrealised PnL printed as if
+it were the realised result. The fixes are in the detection/state layer, not only
+in the formatter.
+
+- **`app/whale/lifecycle.py` (new).** The two state machines written down
+  explicitly — `OrderStatus` (`PLACED → OPEN → PARTIALLY_FILLED → FILLED /
+  CANCELLED / REJECTED`, plus `UNRESOLVED` for a disappearance the exchange never
+  explained) and `PositionStatus` (`NO_POSITION → OPENED → ACTIVE → REDUCED →
+  CLOSED`) — with the legal transitions and, most importantly,
+  `may_modify_position(event)`: **False** for every order event, for
+  `BOOK_LEVEL`, and for an executed trade that arrived without a verified
+  `clearinghouseState` snapshot behind it. `position_status_of()` returns `None`
+  for every order event by construction.
+- **`WhaleEngine._persist` now routes on that gate.** Previously a `WHALE_TRADE`
+  with no position context could write a `positions` row whose side was the
+  *trade* side (`BUY`/`SELL`) — the actual conflation, in the database rather
+  than the message. Order events go to `_persist_order`; position state is
+  written only when `may_modify_position()` allows it.
+- **Realised PnL is captured where Hyperliquid actually reports it.**
+  `closedPnl` on the per-wallet `userEvents`/`userFills` frames is the only
+  realised figure the API gives, so the engine accumulates it per
+  (wallet, coin) — bounded at 500 keys — and attaches it to a `POSITION_CLOSED`
+  event. The renderer then prints `Realized PnL` (confirmed) → `Final PnL (est.)`
+  (the last observed unrealised PnL, now labelled `ESTIMATED`) → `Final PnL: N/A`.
+  Nothing is fabricated and an estimate is never presented as realised.
+- **A close is measured from the last verified non-zero snapshot**, and entry,
+  leverage, liquidation and TP/SL are *not* reconstructed for a position that no
+  longer exists — the alert says `ℹ️ Historical position details unavailable`
+  instead of a wall of `N/A`.
+- **Distance wording is unambiguous.** An order's distance from the mark reads
+  `📐 Distance: +1.37% above` / `-0.36% below` (never a bare sign); a position's
+  reads `📐 From Entry: -0.06%`; a bare execution with no position reads
+  `📐 Fill vs mark:`. New `entry_distance_pct` data point keeps the two
+  measurements from ever sharing a label.
+- **`_order_side_line` refuses anything that is not literally BUY or SELL**, so a
+  position word cannot leak into an order alert even if an upstream field is
+  wrong.
+- **New module `tests/test_order_position_separation.py`** (20 tests): the seven
+  named regression cases (resting SELL with no position; short + resting SELL
+  stay separate; size → 0 closes from the pre-close snapshot; a SELL placed after
+  a close is not a short opening; a fill does not open a position by itself;
+  resting BUY is never a long; a cancellation is not a close) plus the
+  `lifecycle` invariants and the distance/PnL wording. Suite is now
+  **426 passed, 0 failed, 0 skipped**.
+
+---
+
 ## 2026-08-21 — First Railway deploy, and the two defects it exposed
 
 The container started, migrations ran against PostgreSQL, `/health` came up and
