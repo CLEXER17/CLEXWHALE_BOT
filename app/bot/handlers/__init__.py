@@ -39,6 +39,8 @@ COMMANDS = (
     # filters
     ("threshold", admin.cmd_threshold),
     ("setthreshold", admin.cmd_setthreshold),
+    ("margin", admin.cmd_margin),
+    ("setmargin", admin.cmd_setmargin),
     ("cooldown", admin.cmd_cooldown),
     ("settings", admin.cmd_settings),
     ("setcoins", admin.cmd_setcoins),

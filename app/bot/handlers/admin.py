@@ -49,6 +49,24 @@ def parse_usd(raw: str) -> float | None:
     return value if value > 0 else None
 
 
+#: Words that turn a gate off. ``parse_usd`` rejects zero on purpose — a $0
+#: whale threshold is a mistake — but a $0 *margin* gate is how you disable it.
+_OFF_WORDS = frozenset({"0", "off", "none", "no", "disable", "disabled"})
+
+
+def parse_margin(raw: str) -> float | None:
+    """Like :func:`parse_usd`, except ``0`` / ``off`` is valid and means "no gate"."""
+    text = raw.strip().lower().lstrip("$").replace(",", "").replace("_", "")
+    if text in _OFF_WORDS:
+        return 0.0
+    try:
+        if float(text) == 0:
+            return 0.0
+    except ValueError:
+        pass
+    return parse_usd(raw)
+
+
 def parse_coins(args: list[str]) -> tuple[list[str], list[str]]:
     """Split ``BTC eth, sol`` into (valid, invalid)."""
     valid: list[str] = []
@@ -135,6 +153,33 @@ async def cmd_setthreshold(
     applied = await container.settings.set_threshold(requested, actor.telegram_id)
     clamped = abs(applied - requested) > 0.5
     await respond(update, texts.threshold_updated(applied, clamped), edit=False)
+
+
+# ── margin gate ────────────────────────────────────────────────
+@requires(Capability.CHANGE_THRESHOLD)
+async def cmd_margin(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    container = get_container(context)
+    text, keyboard = await views.margin_view(container)
+    await respond(update, text, keyboard, edit=False)
+
+
+@requires(Capability.CHANGE_THRESHOLD)
+async def cmd_setmargin(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    container = get_container(context)
+    args = context.args or []
+    if not args:
+        text, keyboard = await views.margin_view(container)
+        await respond(update, text, keyboard, edit=False)
+        return
+
+    requested = parse_margin(" ".join(args))
+    if requested is None:
+        await respond(update, texts.invalid_number(" ".join(args), "2000000"), edit=False)
+        return
+
+    applied = await container.settings.set_margin(requested, actor.telegram_id)
+    clamped = requested > 0 and abs(applied - requested) > 0.5
+    await respond(update, texts.margin_updated(applied, clamped), edit=False)
 
 
 @requires(Capability.CHANGE_SETTINGS)
@@ -418,10 +463,12 @@ __all__ = [
     "cmd_allcoins",
     "cmd_audit",
     "cmd_cooldown",
+    "cmd_margin",
     "cmd_public",
     "cmd_removeadmin",
     "cmd_removecoin",
     "cmd_setcoins",
+    "cmd_setmargin",
     "cmd_settings",
     "cmd_setthreshold",
     "cmd_startmonitor",
@@ -430,6 +477,7 @@ __all__ = [
     "cmd_unwatch",
     "cmd_watch",
     "parse_coins",
+    "parse_margin",
     "parse_on_off",
     "parse_usd",
     "parse_user_id",

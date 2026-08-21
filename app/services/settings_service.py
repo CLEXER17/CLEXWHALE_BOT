@@ -39,6 +39,7 @@ KEY_MIN_TRADE = "min_trade_value"
 KEY_MIN_POSITION = "min_position_value"
 KEY_MIN_POSITION_DELTA = "min_position_delta_value"
 KEY_MIN_ORDER = "min_order_value"
+KEY_MIN_MARGIN = "min_margin_value"
 KEY_COOLDOWN = "alert_cooldown_seconds"
 KEY_ALL_COINS = "all_coins"
 KEY_MAX_COINS = "max_monitored_coins"
@@ -69,6 +70,10 @@ MAX_THRESHOLD = 1_000_000_000.0
 MIN_COOLDOWN = 0
 MAX_COOLDOWN = 3_600
 
+#: ``0`` means the margin gate is off. Any positive value is clamped into the
+#: same band as the notional thresholds.
+MARGIN_OFF = 0.0
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -80,6 +85,13 @@ class RuntimeConfig:
     min_position_value: float | None = None
     min_position_delta_value: float | None = None
     min_order_value: float | None = None
+
+    #: Margin gate. Hyperliquid reports ``marginUsed`` per position, so this is
+    #: a *second, independent* gate that applies to events carrying a position:
+    #: the collateral actually at risk, never the position notional. ``0``
+    #: disables it, which is the default so existing deployments do not
+    #: suddenly go quiet.
+    min_margin_value: float = 0.0
 
     alert_cooldown_seconds: int = 30
 
@@ -121,6 +133,10 @@ class RuntimeConfig:
     def lowest_threshold(self) -> float:
         """The cheapest gate any detector applies — used for prefiltering."""
         return min(self.effective_thresholds.values())
+
+    @property
+    def margin_gate_enabled(self) -> bool:
+        return self.min_margin_value > 0
 
     # ── coins ─────────────────────────────────────────────────
     def coin_enabled(self, coin: str) -> bool:
@@ -196,6 +212,7 @@ class SettingsService:
             KEY_MIN_POSITION: env.min_position_value,
             KEY_MIN_POSITION_DELTA: env.min_position_delta_value,
             KEY_MIN_ORDER: env.min_order_value,
+            KEY_MIN_MARGIN: float(env.min_margin_value or 0.0),
             KEY_COOLDOWN: int(env.alert_cooldown_seconds),
             KEY_ALL_COINS: bool(env.monitor_all_coins),
             KEY_MAX_COINS: int(env.max_monitored_coins),
@@ -277,6 +294,7 @@ class SettingsService:
             min_position_value=as_float(KEY_MIN_POSITION),
             min_position_delta_value=as_float(KEY_MIN_POSITION_DELTA),
             min_order_value=as_float(KEY_MIN_ORDER),
+            min_margin_value=as_float(KEY_MIN_MARGIN) or 0.0,
             alert_cooldown_seconds=as_int(KEY_COOLDOWN, 30),
             coins=tuple(sorted({c.upper() for c in coins})),
             all_coins=as_bool(KEY_ALL_COINS, False),
@@ -315,6 +333,19 @@ class SettingsService:
     ) -> float:
         clamped = max(MIN_THRESHOLD, min(float(value), MAX_THRESHOLD))
         await self.set_value(key, clamped, admin_id)
+        return clamped
+
+    async def set_margin(self, value: float, admin_id: int | None = None) -> float:
+        """Set the minimum ``marginUsed`` a position must carry to alert.
+
+        ``0`` (or anything negative) turns the gate off. This is deliberately a
+        separate setter from :meth:`set_threshold`: margin is collateral at
+        risk, the thresholds are notional value, and conflating the two would
+        silently change what every existing filter means.
+        """
+        value = float(value)
+        clamped = MARGIN_OFF if value <= 0 else max(MIN_THRESHOLD, min(value, MAX_THRESHOLD))
+        await self.set_value(KEY_MIN_MARGIN, clamped, admin_id)
         return clamped
 
     async def set_cooldown(self, seconds: int, admin_id: int | None = None) -> int:

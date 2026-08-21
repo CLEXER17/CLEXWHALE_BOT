@@ -33,6 +33,7 @@ log = get_logger(__name__)
 #: What each pending kind is allowed to change.
 _REQUIRED = {
     "threshold": Capability.CHANGE_THRESHOLD,
+    "margin": Capability.CHANGE_THRESHOLD,
     "cooldown": Capability.CHANGE_SETTINGS,
     "coins": Capability.CHANGE_COINS,
     "admin_add": Capability.MANAGE_ADMINS,
@@ -101,6 +102,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             edit=False,
         )
         text, keyboard = await views.threshold_view(container)
+        await respond(update, text, keyboard, edit=False)
+        return
+
+    if kind == "margin":
+        requested = admin_cmds.parse_margin(raw)
+        if requested is None:
+            await respond(update, texts.invalid_number(raw, "2000000"), edit=False)
+            return
+        applied = await container.settings.set_margin(requested, actor.telegram_id)
+        clamped = requested > 0 and abs(applied - requested) > 0.5
+        await respond(update, texts.margin_updated(applied, clamped), edit=False)
+        text, keyboard = await views.margin_view(container)
         await respond(update, text, keyboard, edit=False)
         return
 

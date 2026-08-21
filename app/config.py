@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     min_order_value: float | None = None
     min_position_delta_value: float | None = None
 
+    #: Minimum ``marginUsed`` (collateral at risk) a position must carry before
+    #: it alerts. ``0`` disables the gate. Seeds the database on first boot only.
+    min_margin_value: float = 0.0
+
     # ── Alerting ───────────────────────────────────────────────
     alert_cooldown_seconds: int = 30
     alert_rate_per_minute: int = 20

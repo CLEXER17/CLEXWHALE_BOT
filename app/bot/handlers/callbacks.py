@@ -50,6 +50,7 @@ _AREA_CAPABILITY = {
     inline.CB_PANEL: Capability.CHANGE_SETTINGS,
     inline.CB_MON: Capability.CONTROL_MONITORING,
     inline.CB_THRESH: Capability.CHANGE_THRESHOLD,
+    inline.CB_MARGIN: Capability.CHANGE_THRESHOLD,
     inline.CB_COIN: Capability.CHANGE_COINS,
     inline.CB_ADMIN: Capability.MANAGE_ADMINS,
     inline.CB_PUBLIC: Capability.CHANGE_PUBLIC_MODE,
@@ -154,6 +155,10 @@ async def _dispatch(
         await _threshold(update, context, container, actor, action, arg)
         return
 
+    if area == inline.CB_MARGIN:
+        await _margin(update, context, container, actor, action, arg)
+        return
+
     if area == inline.CB_COIN:
         await _coins(update, context, container, actor, action, arg)
         return
@@ -234,6 +239,36 @@ async def _threshold(
         return
 
     text, keyboard = await views.threshold_view(container)
+    await respond(update, text, keyboard)
+
+
+async def _margin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    container: AppContainer,
+    actor: Actor,
+    action: str,
+    arg: str | None,
+) -> None:
+    if action == "prompt":
+        context.user_data["pending"] = {"kind": "margin"}
+        await respond(update, texts.PROMPT_MARGIN, inline.cancel_prompt())
+        return
+
+    if action == "set" and arg is not None:
+        # "0" is a legitimate value here — it turns the gate off — so it is
+        # parsed rather than treated as a missing argument.
+        requested = admin_cmds.parse_margin(arg)
+        if requested is None:
+            await notify(update, "That is not a valid amount.", alert=True)
+            return
+        applied = await container.settings.set_margin(requested, actor.telegram_id)
+        text, keyboard = await views.margin_view(container)
+        toast = "Margin gate off" if applied <= 0 else f"Margin: ${applied:,.0f}"
+        await respond(update, text, keyboard, toast=toast)
+        return
+
+    text, keyboard = await views.margin_view(container)
     await respond(update, text, keyboard)
 
 

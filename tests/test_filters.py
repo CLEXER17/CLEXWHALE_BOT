@@ -1,4 +1,4 @@
-"""Threshold, coin and detector-toggle gating.
+"""Threshold, coin, margin and detector-toggle gating.
 
 Spec §36: "Coin filtering", "Whale threshold detection". Spec §7: each
 ``ValueKind`` gets its own minimum so a position notional is never compared
@@ -8,11 +8,13 @@ against a cash-flow threshold.
 from __future__ import annotations
 
 from app.services.settings_service import RuntimeConfig
-from app.whale.events import EventType, ValueKind, WhaleEvent
+from app.whale.events import DataPoint, EventType, ValueKind, WhaleEvent
 from app.whale.filters import (
     REASON_CANCELS_OFF,
     REASON_COIN,
     REASON_DETECTOR,
+    REASON_MARGIN,
+    REASON_MARGIN_UNKNOWN,
     REASON_MONITORING_OFF,
     REASON_OK,
     REASON_THRESHOLD,
@@ -37,8 +39,9 @@ def event(
     value_kind: ValueKind = ValueKind.TRADE_VALUE,
     coin: str = "BTC",
     notional: float = 3_000_000.0,
+    margin: float | None = None,
 ) -> WhaleEvent:
-    return WhaleEvent(
+    whale = WhaleEvent(
         event_type=event_type,
         coin=coin,
         notional=notional,
@@ -47,6 +50,9 @@ def event(
         wallet="0x" + "11" * 20,
         detection="test",
     )
+    if margin is not None:
+        whale.set("margin_used", DataPoint.confirmed(margin))
+    return whale
 
 
 def config(**overrides) -> RuntimeConfig:
@@ -196,6 +202,88 @@ def test_book_scanner_is_off_by_default():
     result = make_filter().evaluate(book, config())
     assert result.accepted is False
     assert result.reason == REASON_DETECTOR
+
+
+# ── margin gate ────────────────────────────────────────────────
+
+def test_margin_gate_is_off_by_default():
+    """Adding the feature must not silence an existing deployment."""
+    cfg = config(min_whale_value=2_000_000)
+    assert cfg.margin_gate_enabled is False
+    assert make_filter().evaluate(event(notional=3_000_000), cfg).accepted is True
+
+
+def test_a_position_above_the_margin_gate_is_accepted():
+    cfg = config(min_whale_value=2_000_000, min_margin_value=2_000_000)
+    result = make_filter().evaluate(event(notional=20_000_000, margin=2_500_000), cfg)
+    assert result.accepted is True
+    assert result.margin_gate == 2_000_000
+
+
+def test_a_position_below_the_margin_gate_is_rejected():
+    """The whole point: a $20M position at 50x carries only $400k of margin."""
+    cfg = config(min_whale_value=2_000_000, min_margin_value=2_000_000)
+    result = make_filter().evaluate(event(notional=20_000_000, margin=400_000), cfg)
+    assert result.accepted is False
+    assert result.reason == REASON_MARGIN
+    assert result.margin_gate == 2_000_000
+
+
+def test_exactly_at_the_margin_gate_is_accepted():
+    cfg = config(min_margin_value=2_000_000)
+    assert make_filter().evaluate(event(margin=2_000_000), cfg).accepted is True
+
+
+def test_margin_is_never_read_from_the_notional():
+    """A large notional with no margin figure must not pass as if it had one."""
+    cfg = config(min_whale_value=2_000_000, min_margin_value=1_000)
+    result = make_filter().evaluate(event(notional=500_000_000, margin=None), cfg)
+    assert result.accepted is False
+    assert result.reason == REASON_MARGIN_UNKNOWN
+
+
+def test_unknown_margin_is_rejected_with_its_own_reason():
+    cfg = config(min_margin_value=2_000_000)
+    result = make_filter().evaluate(event(margin=None), cfg)
+    assert result.accepted is False
+    assert result.reason == REASON_MARGIN_UNKNOWN
+    # Distinguishable from a below-gate rejection, so /status can explain it.
+    assert result.reason != REASON_MARGIN
+
+
+def test_resting_orders_and_book_levels_are_exempt_from_the_margin_gate():
+    """No collateral is committed until a fill, so gating these is meaningless."""
+    cfg = config(min_margin_value=5_000_000, enable_book_scanner=True)
+    order = event(
+        event_type=EventType.ORDER_PLACED,
+        value_kind=ValueKind.ORDER_NOTIONAL,
+        notional=3_000_000,
+    )
+    book = event(
+        event_type=EventType.BOOK_LEVEL,
+        value_kind=ValueKind.BOOK_LEVEL_NOTIONAL,
+        notional=3_000_000,
+    )
+    assert make_filter().evaluate(order, cfg).accepted is True
+    assert make_filter().evaluate(book, cfg).accepted is True
+
+
+def test_the_threshold_is_applied_before_the_margin_gate():
+    """A tiny trade is rejected for being tiny, not for its margin."""
+    cfg = config(min_whale_value=2_000_000, min_margin_value=2_000_000)
+    result = make_filter().evaluate(event(notional=1_000, margin=None), cfg)
+    assert result.reason == REASON_THRESHOLD
+
+
+def test_margin_rejections_are_counted_separately():
+    whale_filter = make_filter()
+    cfg = config(min_whale_value=2_000_000, min_margin_value=2_000_000)
+    whale_filter.evaluate(event(margin=3_000_000), cfg)
+    whale_filter.evaluate(event(margin=100_000), cfg)
+    whale_filter.evaluate(event(margin=None), cfg)
+    snapshot = whale_filter.stats.as_dict()
+    assert snapshot["accepted"] == 1
+    assert snapshot["rejected"] == {REASON_MARGIN: 1, REASON_MARGIN_UNKNOWN: 1}
 
 
 # ── statistics ─────────────────────────────────────────────────

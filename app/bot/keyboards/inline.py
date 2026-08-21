@@ -20,6 +20,7 @@ from app.utils.formatting import bool_badge, fmt_usd
 CB_PANEL = "panel"
 CB_MON = "mon"
 CB_THRESH = "thr"
+CB_MARGIN = "mgn"
 CB_COIN = "coin"
 CB_ADMIN = "adm"
 CB_PUBLIC = "pub"
@@ -34,6 +35,8 @@ SUGGESTED_COINS = ("BTC", "ETH", "SOL", "DOGE", "XRP", "HYPE", "SUI", "AVAX", "L
 
 #: Threshold presets in USD.
 THRESHOLD_PRESETS = (500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000)
+#: Margin presets in USD. ``0`` is the "off" button, not a $0 gate.
+MARGIN_PRESETS = (0, 100_000, 500_000, 1_000_000, 2_000_000, 5_000_000)
 COOLDOWN_PRESETS = (0, 15, 30, 60, 300)
 
 
@@ -54,6 +57,13 @@ def control_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(monitoring, callback_data=_cb(CB_MON, "toggle")),
                 InlineKeyboardButton("💰 Threshold", callback_data=_cb(CB_THRESH, "open")),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏦 Margin: "
+                    + (fmt_usd(config.min_margin_value, 0) if config.margin_gate_enabled else "off"),
+                    callback_data=_cb(CB_MARGIN, "open"),
+                ),
             ],
             [
                 InlineKeyboardButton("🪙 Coins", callback_data=_cb(CB_COIN, "open")),
@@ -111,6 +121,30 @@ def threshold_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
     rows.append(
         [InlineKeyboardButton("✏️ Custom amount", callback_data=_cb(CB_THRESH, "prompt"))]
     )
+    rows.append([back_button()])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── margin gate ────────────────────────────────────────────────
+def margin_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
+    """Minimum ``marginUsed`` a position must carry before it alerts.
+
+    Separate from the threshold panel on purpose: margin is collateral at risk,
+    the threshold is notional value, and one is not a substitute for the other.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for index in range(0, len(MARGIN_PRESETS), 3):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    ("✅ " if abs(config.min_margin_value - value) < 1 else "")
+                    + ("🚫 Off" if value == 0 else fmt_usd(value, 0)),
+                    callback_data=_cb(CB_MARGIN, "set", value),
+                )
+                for value in MARGIN_PRESETS[index : index + 3]
+            ]
+        )
+    rows.append([InlineKeyboardButton("✏️ Custom margin", callback_data=_cb(CB_MARGIN, "prompt"))])
     rows.append([back_button()])
     return InlineKeyboardMarkup(rows)
 
@@ -220,8 +254,14 @@ def settings_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
                     "💰 Minimum Whale Value", callback_data=_cb(CB_THRESH, "open")
                 )
             ],
-            [InlineKeyboardButton("🪙 Monitored Coins", callback_data=_cb(CB_COIN, "open"))],
             [
+                InlineKeyboardButton(
+                    "🏦 Minimum Margin: "
+                    + (fmt_usd(config.min_margin_value, 0) if config.margin_gate_enabled else "off"),
+                    callback_data=_cb(CB_MARGIN, "open"),
+                )
+            ],
+            [InlineKeyboardButton("🪙 Monitored Coins", callback_data=_cb(CB_COIN, "open"))],            [
                 InlineKeyboardButton(
                     f"📡 Monitoring: {bool_badge(config.monitoring_enabled)}",
                     callback_data=_cb(CB_MON, "status"),

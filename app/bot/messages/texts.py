@@ -49,6 +49,11 @@ PROMPT_THRESHOLD = (
     "Send the minimum whale value in USD.\n"
     "Example: <code>2000000</code> for $2,000,000."
 )
+PROMPT_MARGIN = (
+    "Send the minimum <b>margin</b> in USD — the collateral a position must\n"
+    "have at risk before it alerts.\n"
+    "Example: <code>2000000</code> for $2,000,000. Send <code>0</code> to turn the gate off."
+)
 PROMPT_COINS = (
     "Send the coins to monitor, separated by spaces.\n"
     "Example: <code>BTC ETH SOL</code>"
@@ -160,6 +165,8 @@ def help_text(*, admin: bool, main_admin: bool) -> str:
             "<b>Filters</b>",
             "/threshold — show the whale filter",
             "/setthreshold &lt;USD&gt; — e.g. /setthreshold 2000000",
+            "/margin — show the margin gate",
+            "/setmargin &lt;USD&gt; — alert only above this margin (0 = off)",
             "/cooldown &lt;seconds&gt; — per-signal cooldown",
             "/setcoins BTC ETH SOL — replace the coin list",
             "/addcoin XRP — add one coin",
@@ -218,6 +225,44 @@ def threshold_panel(config: RuntimeConfig) -> str:
     return "\n".join(lines)
 
 
+def margin_panel(config: RuntimeConfig) -> str:
+    """Explain exactly what the margin gate does, including what it cannot do."""
+    lines = [
+        "🏦 <b>MARGIN FILTER</b>",
+        DIVIDER,
+        "<b>Minimum margin:</b>",
+        fmt_usd_full(config.min_margin_value) if config.margin_gate_enabled else "🚫 Off",
+    ]
+    if config.margin_gate_enabled:
+        lines += [
+            DIVIDER,
+            "Only positions with at least this much <b>collateral at risk</b>",
+            "(Hyperliquid's <code>marginUsed</code>) will alert.",
+            "",
+            "This is <b>not</b> the position notional: a $20M position at 20x",
+            "carries $1M of margin.",
+            "",
+            "⚠️ Resting-order and order-book signals have no margin —",
+            "no collateral is committed until a fill — so they are not",
+            "gated by this setting. Use 💰 Threshold for those.",
+            "",
+            "⚠️ A position whose margin cannot be read is <b>not</b> sent.",
+            "See /status if signals go quiet.",
+        ]
+    else:
+        lines += [
+            DIVIDER,
+            "The margin gate is off: signals are filtered by value only.",
+            "Turn it on to receive alerts only from positions holding at",
+            "least a given amount of collateral at risk.",
+        ]
+    lines += [
+        DIVIDER,
+        f"💰 Minimum value: {fmt_usd_full(config.min_whale_value)}",
+    ]
+    return "\n".join(lines)
+
+
 # ── coins (spec §7) ────────────────────────────────────────────
 def coins_panel(config: RuntimeConfig, monitored: Sequence[str] = (), skipped: int = 0) -> str:
     lines = [
@@ -259,6 +304,8 @@ def status_panel(config: RuntimeConfig, stats: Mapping[str, Any]) -> str:
         f"<b>Hyperliquid feed:</b> {'🟢 connected' if connected else '🔴 disconnected'}",
         f"<b>Access:</b> {'🌐 PUBLIC' if config.public_mode else '🔒 PRIVATE'}",
         f"<b>Threshold:</b> {fmt_usd_full(config.min_whale_value)}",
+        "<b>Margin gate:</b> "
+        + (fmt_usd_full(config.min_margin_value) if config.margin_gate_enabled else "off"),
         f"<b>Coins:</b> {escape_html(config.coin_label)}",
         DIVIDER,
         f"Trades observed: <b>{engine.get('trades_seen', 0):,}</b>",
@@ -388,6 +435,8 @@ def settings_panel(config: RuntimeConfig) -> str:
             "⚙️ <b>SETTINGS</b>",
             DIVIDER,
             f"💰 <b>Minimum Whale Value:</b> {fmt_usd_full(config.min_whale_value)}",
+            "🏦 <b>Minimum Margin:</b> "
+            + (fmt_usd_full(config.min_margin_value) if config.margin_gate_enabled else "off"),
             f"🪙 <b>Monitored Coins:</b> {escape_html(config.coin_label)}",
             f"📡 <b>Monitoring:</b> {'ON' if config.monitoring_enabled else 'OFF'}",
             f"🌐 <b>Public Mode:</b> {'ON' if config.public_mode else 'OFF'}",
@@ -742,6 +791,18 @@ def invalid_wallet(argument: str) -> str:
 
 def threshold_updated(value: float, clamped: bool) -> str:
     text = f"✅ Minimum whale value set to <b>{fmt_usd_full(value)}</b>."
+    if clamped:
+        text += "\n<i>Adjusted to the allowed range ($1,000 – $1,000,000,000).</i>"
+    return text
+
+
+def margin_updated(value: float, clamped: bool) -> str:
+    if value <= 0:
+        return "✅ Margin gate <b>off</b>. Signals are filtered by value only."
+    text = (
+        f"✅ Minimum margin set to <b>{fmt_usd_full(value)}</b>.\n"
+        "Only positions with at least that much collateral at risk will alert."
+    )
     if clamped:
         text += "\n<i>Adjusted to the allowed range ($1,000 – $1,000,000,000).</i>"
     return text

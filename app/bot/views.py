@@ -87,6 +87,11 @@ async def threshold_view(container: AppContainer) -> View:
     return texts.threshold_panel(config), inline.threshold_panel(config)
 
 
+async def margin_view(container: AppContainer) -> View:
+    config = container.settings.config
+    return texts.margin_panel(config), inline.margin_panel(config)
+
+
 async def cooldown_view(container: AppContainer) -> View:
     config = container.settings.config
     return texts.settings_panel(config), inline.cooldown_panel(config)

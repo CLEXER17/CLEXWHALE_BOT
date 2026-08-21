@@ -309,6 +309,51 @@ async def test_a_stranger_cannot_run_setthreshold(container, ctx):
     assert "currently private" in update.last
 
 
+async def test_setmargin_accepts_shorthand(container, ctx):
+    ctx.args = ["2m"]
+    await admin_cmds.cmd_setmargin(FakeUpdate(MAIN_ADMIN_ID, text="/setmargin 2m"), ctx)
+    assert container.settings.config.min_margin_value == 2_000_000.0
+    assert container.settings.config.margin_gate_enabled is True
+
+
+async def test_setmargin_zero_turns_the_gate_off(container, ctx):
+    """``0`` is a valid margin (it disables the gate), unlike a $0 threshold."""
+    ctx.args = ["2m"]
+    await admin_cmds.cmd_setmargin(FakeUpdate(MAIN_ADMIN_ID, text="/setmargin 2m"), ctx)
+    ctx.args = ["0"]
+    update = FakeUpdate(MAIN_ADMIN_ID, text="/setmargin 0")
+    await admin_cmds.cmd_setmargin(update, ctx)
+    assert container.settings.config.min_margin_value == 0.0
+    assert container.settings.config.margin_gate_enabled is False
+    assert "off" in update.last
+
+
+async def test_setmargin_leaves_the_whale_threshold_alone(container, ctx):
+    """Margin is collateral at risk; the threshold is notional. Never the same knob."""
+    before = container.settings.config.min_whale_value
+    ctx.args = ["2m"]
+    await admin_cmds.cmd_setmargin(FakeUpdate(MAIN_ADMIN_ID, text="/setmargin 2m"), ctx)
+    assert container.settings.config.min_whale_value == before
+
+
+async def test_setmargin_rejects_nonsense_without_changing_anything(container, ctx):
+    before = container.settings.config.min_margin_value
+    ctx.args = ["banana"]
+    update = FakeUpdate(MAIN_ADMIN_ID, text="/setmargin banana")
+    await admin_cmds.cmd_setmargin(update, ctx)
+    assert container.settings.config.min_margin_value == before
+    assert "not a valid number" in update.last
+
+
+async def test_a_stranger_cannot_run_setmargin(container, ctx):
+    before = container.settings.config.min_margin_value
+    ctx.args = ["500000000"]
+    update = FakeUpdate(STRANGER_ID, text="/setmargin 500000000")
+    await admin_cmds.cmd_setmargin(update, ctx)
+    assert container.settings.config.min_margin_value == before
+    assert "currently private" in update.last
+
+
 async def test_setcoins_replaces_the_list_and_leaves_all_coins_mode(container, ctx):
     await container.settings.set_value("all_coins", True, MAIN_ADMIN_ID)
     ctx.args = ["btc,", "eth"]
