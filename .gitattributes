@@ -1,0 +1,8 @@
+# Normalise line endings so a Windows checkout still produces a Linux-runnable
+# container. A CRLF shebang makes `start.sh` fail with "bad interpreter" on
+# Railway, so shell scripts are pinned to LF regardless of core.autocrlf.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.png binary
+*.jpg binary
