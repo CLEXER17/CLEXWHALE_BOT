@@ -67,9 +67,9 @@ renders as "not publicly detectable" rather than "none set".
 event_type    EventType   WHALE_TRADE | POSITION_OPENED | POSITION_INCREASED |
                           POSITION_DECREASED | POSITION_CLOSED | POSITION_FLIPPED |
                           ORDER_PLACED | ORDER_MODIFIED | ORDER_PARTIALLY_FILLED |
-                          ORDER_FILLED | ORDER_CANCELLED | BOOK_WALL | WALLET_ACTIVITY
-value_kind    ValueKind   TRADE_NOTIONAL | ORDER_NOTIONAL | POSITION_NOTIONAL |
-                          POSITION_DELTA | MARGIN | BOOK_DEPTH
+                          ORDER_FILLED | ORDER_CANCELLED | ORDER_REJECTED | BOOK_LEVEL
+value_kind    ValueKind   TRADE_VALUE | ORDER_NOTIONAL | POSITION_NOTIONAL |
+                          POSITION_DELTA | MARGIN | BOOK_LEVEL_NOTIONAL
 coin          str
 side          "LONG" | "SHORT" | "BUY" | "SELL" | None
 wallet        str | None            (None for book walls — no attribution)

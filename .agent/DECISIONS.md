@@ -115,3 +115,24 @@ Real PTB objects would drag in a live `Bot` for `query.answer()`.
 **DECISION:** Pin `*.sh` and `Dockerfile` to LF in `.gitattributes`.
 **REASON:** The project is developed on Windows; a CRLF shebang fails on Linux
 with "bad interpreter".
+
+**DECISION:** Serialise the engine's database write with a single
+`asyncio.Lock` (`WhaleEngine._write_lock`) rather than making the repositories
+upsert-safe.
+**REASON:** Three ingest workers run concurrently and two events for the same
+wallet can be in flight at once. `WalletRepository.record_activity` and the
+position write are read-then-write, so unsynchronised sessions race: the losing
+transaction fails (`StaleDataError` on SQLite, unique-key `IntegrityError` on
+PostgreSQL), `_persist` returns `None`, `dedup.forget()` runs — and the alert is
+silently never sent. Found by `tests/test_engine_pipeline.py`
+(`test_an_order_of_magnitude_larger_trade_breaks_the_cooldown` produced 0 alerts
+instead of 2). The lock is held only around the write, never around REST
+enrichment, so it costs no throughput on the slow path. A dialect-specific
+upsert was rejected because the same code must run on SQLite locally and
+PostgreSQL in production.
+
+**DECISION:** Assert pipeline timing with queue joins, never `asyncio.sleep`.
+**REASON:** `tests/test_engine_pipeline.py` waits on `engine.trades_seen`, then
+`engine._queue.join()` and `alerts._queue.join()`. This makes "no alert was
+produced" a real assertion instead of a race, and keeps the end-to-end suite
+deterministic and fast.

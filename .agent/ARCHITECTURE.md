@@ -104,9 +104,9 @@ Tables: `admins`, `users`, `settings`, `tracked_coins`, `tracked_wallets`,
 ## Event processing
 
 `WhaleEvent` is a bag of `DataPoint`s plus indexed scalars. `event_type` is one
-of 13 values (whale trade, position opened/increased/decreased/closed/flipped,
-order placed/modified/cancelled/filled/partially filled, book wall, wallet
-activity). `value_kind` records *what* the notional measures so a $4.8M
+of 13 values (`WHALE_TRADE`, `POSITION_OPENED/INCREASED/DECREASED/CLOSED/FLIPPED`,
+`ORDER_PLACED/MODIFIED/CANCELLED/FILLED/PARTIALLY_FILLED/REJECTED`,
+`BOOK_LEVEL`). `value_kind` records *what* the notional measures so a $4.8M
 position is never compared against a $4.8M cash flow threshold.
 
 ## Whale detection
@@ -119,8 +119,8 @@ position is never compared against a $4.8M cash flow threshold.
 - **Order**: diff `frontendOpenOrders` per wallet plus live `orderUpdates`.
   A vanished order is resolved through `orderStatus`; if that is inconclusive
   the event says "outcome unresolved" instead of guessing cancel or fill.
-- **Book**: an aggregated `l2Book` level above the threshold; wallet unknown by
-  construction and labelled as such.
+- **Book**: an aggregated `l2Book` level above the threshold (`BOOK_LEVEL`);
+  wallet unknown by construction and labelled as such.
 
 ## Admin permissions
 
