@@ -1,0 +1,40 @@
+# Keep secrets and local clutter out of the build context entirely — an image
+# layer is as public as a git commit.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials/
+
+.git/
+.gitignore
+.github/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local database files; production state lives in PostgreSQL.
+*.db
+*.sqlite3
+*.log
+
+# Development-only helpers: not imported by the application.
+tests/
+scripts/
+render_preview.txt
+requirements-dev.txt
+README.md
+railway.toml
+Dockerfile
+.dockerignore
+.DS_Store

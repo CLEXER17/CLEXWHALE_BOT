@@ -1,0 +1,40 @@
+# ── Never commit secrets ────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials/
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ── Test / tooling caches ───────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── Local state (production state lives in PostgreSQL) ──────
+*.db
+*.sqlite3
+*.log
+# Output of scripts/render_preview.py — a local rendering check, not source.
+render_preview.txt
+
+# ── Editors / OS ────────────────────────────────────────────
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
