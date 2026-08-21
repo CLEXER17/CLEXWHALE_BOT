@@ -4,6 +4,41 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-21 — Documentation for release
+
+- `README.md`: features, command table, permission matrix, local installation,
+  the full environment-variable table (values taken from `.env.example`, never
+  real credentials), BotFather setup, the GitHub flow with **no invented remote
+  URL**, the Railway flow (connect repo → variables → provision PostgreSQL →
+  deploy → automatic migration on boot → `/health` → verify in Telegram), and an
+  explicit "what Hyperliquid does and does not provide" section.
+- `.agent/API_NOTES.md`: per data source — subscription/endpoint, purpose, fields
+  available, fields written as `NOT AVAILABLE FROM THIS DATA SOURCE`,
+  authentication (none anywhere), rate limits, implementation location and
+  verification date.
+- `.agent/TEST_STATUS.md`: actual results, per-module timings, a §36
+  requirement → test-name map, the defect the suite found, and five honest
+  limitations of the suite.
+- `.agent/NOW.md`, `.agent/HANDOFF.md`, `.agent/FILE_INDEX.md` added; the
+  project-memory set is now all eleven files.
+
+## 2026-08-21 — Test suite (spec §36)
+
+- 11 test modules, **379 tests, 0 failures, 0 skips**, entirely offline: no
+  Hyperliquid connection, no Telegram API, no PostgreSQL. Only two seams are
+  substituted (`HyperliquidREST._client`, `websocket.ws_connect`) and the bot is
+  a fake.
+- `tests/test_engine_pipeline.py` (22 tests) pushes a raw `trades` websocket
+  frame through the real pipeline and asserts the final Telegram message text
+  plus the persisted rows — including the three distinct TP/SL states, so an
+  unavailable value can never be printed as a real one. Timing is asserted with
+  queue joins, never `asyncio.sleep`.
+- **Fixed a real alert-losing defect** the suite exposed: `WhaleEngine._persist`
+  ran in three concurrent workers, and two events for the same wallet raced on
+  the read-then-write of `wallets` / `positions`. The losing transaction failed,
+  the event was never persisted, and **its alert was never sent**. Now
+  serialised by `WhaleEngine._write_lock`, held only around the database write.
+
 ## 2026-08-21 — Project memory + git history
 
 - Initialised the git repository and split the existing tree into eight logical
@@ -69,7 +104,7 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ## 2026-08-21 — Database
 
-- 12 tables, 12 repositories, hand-written Alembic `0001_initial.py` verified by
+- 12 tables, 11 repositories, hand-written Alembic `0001_initial.py` verified by
   `upgrade head`, `alembic check` and a `downgrade base` → `upgrade head`
   round-trip.
 - `env.py` honours `configure_logging` so migrations keep the secret-redacting

@@ -9,10 +9,12 @@ Read this file first. The repository is the source of truth; this file records
 
 ## CURRENT PHASE
 
-**PHASE 13 — TESTING** (unit + integration suite, spec §36)
+**PHASE 15 — PRE-DEPLOYMENT VERIFICATION** (spec §54)
 
-Phases 1–12 are implemented and verified. Phase 14 (Railway deployment docs)
-is the last remaining item after tests.
+Phases 1–14 are implemented and verified, including the full §36 test suite
+(**379 passed, 0 failed, 0 skipped**) and all documentation. What remains is the
+final commit sequence and a deployment-readiness report. **Nothing is pushed and
+nothing is deployed**; no Git remote exists and none may be invented.
 
 ---
 
@@ -23,7 +25,7 @@ is the last remaining item after tests.
 - Weighted REST rate limiter + token bucket (`app/utils/ratelimit.py`)
 - Exponential backoff with jitter (`app/utils/backoff.py`), TTL cache (`app/utils/cache.py`)
 - Confidence-labelled formatting primitives (`app/utils/formatting.py`)
-- PostgreSQL schema: 11 tables, 12 repositories, hand-written Alembic migration
+- PostgreSQL schema: 12 tables, 11 repositories, hand-written Alembic migration
   `0001_initial.py` (verified `upgrade head` → `downgrade base` → `upgrade head`)
 - Hyperliquid REST client with per-endpoint weights and a 1200/min IP budget
 - Hyperliquid WebSocket client with reconnect, resubscribe and heartbeat
@@ -40,24 +42,35 @@ is the last remaining item after tests.
 - Entry point with migrations-on-boot, `/health`, graceful SIGTERM shutdown
 - Dockerfile, `railway.toml` (one service), `start.sh`, `.env.example`
 - Git repository initialised with logical commits
+- **Test suite (spec §36): 11 modules, 379 tests, all passing offline** — no
+  Hyperliquid connection, no Telegram API, no PostgreSQL required
+- **`WhaleEngine._write_lock`** — fix for a concurrent-write race found by the
+  end-to-end pipeline test, which silently dropped alerts (see `DECISIONS.md`)
+- **Documentation**: `README.md`, `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`
 
 ## CURRENTLY WORKING ON
 
-- `tests/` package: conftest fixtures, factories, unit tests, integration tests
+- Final commit sequence (three `test:` commits, two `docs:` commits) and the
+  deployment-readiness report
 
 ## NEXT TASK
 
-1. Finish `tests/` and run green: `./.venv/Scripts/python.exe -m pytest`
-2. Write `README.md` (BotFather → git → 10-step Railway flow → env vars → updates)
-3. Final production checklist pass (spec §54)
+1. Commit in logical order; do not squash unrelated changes
+2. Produce the deployment-readiness report and **stop**
+3. Deployment itself is blocked until the user supplies their own GitHub remote
 
 ---
 
 ## FILES MODIFIED (this phase)
 
-- `.gitignore`, `.gitattributes` (new)
-- `.agent/*` (new)
-- `tests/*` (new — in progress)
+- `app/whale/engine.py` — added `_write_lock` around the persistence write
+  (the only `app/` change since Phase 13)
+- `tests/*` (new — complete, 379 tests)
+- `README.md` (new)
+- `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`, `.agent/NOW.md`,
+  `.agent/HANDOFF.md`, `.agent/FILE_INDEX.md` (new)
+- `.agent/PROJECT_STATE.md`, `.agent/TASK_QUEUE.md`, `.agent/DECISIONS.md`,
+  `.agent/CHANGELOG.md`, `.agent/ARCHITECTURE.md`, `.agent/DATA_MODEL.md` (updated)
 
 ## FILES VERIFIED
 
@@ -104,7 +117,17 @@ rather than worked around with invented data.
 
 ## TEST STATUS
 
-- Unit tests: in progress (target: spec §36 list, all 16 items)
-- Integration tests: in progress (trade → detect → filter → dedup → persist → alert)
-- Alembic migration: verified manually (round-trip)
-- Railway deployment: pending (docs + first push)
+Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
+
+- **TOTAL 379 · PASSED 379 · FAILED 0 · SKIPPED 0** (43.00 s)
+- Run with `./.venv/Scripts/python.exe -m pytest -q`. The bare `python` on PATH
+  is not the project interpreter and lacks `pytest_asyncio`.
+- Unit tests: all 16 items of the spec §36 list are covered; the mapping from
+  requirement to test name is in `TEST_STATUS.md`.
+- Integration tests: `test_engine_pipeline.py` drives a raw `trades` frame all
+  the way to the final Telegram message text; also `test_database.py`,
+  `test_resilience.py`, `test_telegram_handlers.py`.
+- Alembic migration: verified manually (`upgrade head` → `downgrade base` →
+  `upgrade head`). The suite runs on SQLite and does not execute the migration
+  scripts.
+- Railway deployment: not yet performed — pending the user's own GitHub remote.
