@@ -31,7 +31,6 @@ import pytest
 
 from app.database.repository import EventRepository, PositionRepository, WalletRepository
 from app.hyperliquid import websocket as ws_module
-from app.utils.formatting import short_wallet
 from app.whale.events import EventType, ValueKind
 from tests.conftest import MAIN_ADMIN_ID, FakeBot
 from tests.factories import BTC_PX, WALLET_A, WALLET_B, raw_trade
@@ -248,9 +247,9 @@ async def test_a_raw_trades_frame_becomes_one_formatted_whale_alert(wire):
     assert "📦 <b>Size:</b> 60 BTC" in text
     assert "🏦 <b>Margin:</b> $1.18M" in text
 
-    # Wallet formatting: an address, shortened, and no identity claim (§20).
-    assert f"👤 <b>Trader:</b> <code>{short_wallet(WALLET_A)}</code>" in text
-    assert WALLET_A not in text                         # never the full address
+    # Wallet formatting: the full address, copy-pasteable, no identity claim (§20).
+    assert f"👤 <b>Trader:</b> <code>{WALLET_A}</code>" in text
+    assert "..." not in text                             # never an abbreviation
     assert "🕐 <b>Detected:</b>" in text
     assert "🔎 <b>Detection:</b> Large market trade (executed trade value)" in text
 
@@ -313,7 +312,7 @@ async def test_a_sell_aggressor_on_a_short_renders_as_a_short(wire):
     assert "📉 SHORT" in text
     assert "📈 LONG" not in text
     # ``side: "A"`` means the seller was the aggressor: users[1].
-    assert f"<code>{short_wallet(WALLET_A)}</code>" in text
+    assert f"<code>{WALLET_A}</code>" in text
 
 
 # ── threshold, coin filter, monitoring switch ──────────────────

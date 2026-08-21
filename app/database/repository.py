@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Sequence
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
@@ -186,6 +186,18 @@ class UserRepository:
     async def subscribers(session: AsyncSession) -> list[User]:
         stmt = select(User).where(User.is_subscribed.is_(True), User.is_blocked.is_(False))
         return list((await session.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def unsubscribed_ids(session: AsyncSession) -> set[int]:
+        """Users who sent /stop (or blocked the bot).
+
+        Only *explicit* opt-outs are returned. A user with no row at all is not
+        in this set, so a never-seen administrator still receives alerts.
+        """
+        stmt = select(User.telegram_id).where(
+            or_(User.is_subscribed.is_(False), User.is_blocked.is_(True))
+        )
+        return {int(telegram_id) for telegram_id in (await session.execute(stmt)).scalars().all()}
 
     @staticmethod
     async def bump_alert_counts(session: AsyncSession, telegram_ids: Sequence[int]) -> None:
@@ -551,6 +563,7 @@ class AlertRepository:
         event_id: int | None = None,
         chat_id: int | None = None,
         message_id: int | None = None,
+        thread_key: str | None = None,
         ok: bool = True,
         error: str | None = None,
     ) -> None:
@@ -560,10 +573,37 @@ class AlertRepository:
                 event_id=event_id,
                 chat_id=chat_id,
                 message_id=message_id,
+                thread_key=(thread_key or None),
                 ok=ok,
                 error=(error or None) if error is None else error[:256],
             )
         )
+
+    @staticmethod
+    async def thread_roots(
+        session: AsyncSession, since: datetime, limit: int = 500
+    ) -> list[tuple[int, str, int]]:
+        """``(chat_id, thread_key, message_id)`` for recently delivered alerts.
+
+        Oldest first, so a caller keeping the *first* row per ``(chat, thread)``
+        anchors each thread to its earliest still-recent message. Used to restore
+        reply threading after a restart — without it every redeploy would start a
+        fresh, unconnected thread for wallets already being reported.
+        """
+        stmt = (
+            select(AlertHistory.chat_id, AlertHistory.thread_key, AlertHistory.message_id)
+            .where(
+                AlertHistory.sent_at >= since,
+                AlertHistory.ok.is_(True),
+                AlertHistory.thread_key.is_not(None),
+                AlertHistory.message_id.is_not(None),
+                AlertHistory.chat_id.is_not(None),
+            )
+            .order_by(AlertHistory.sent_at.asc())
+            .limit(limit)
+        )
+        rows = (await session.execute(stmt)).all()
+        return [(int(chat_id), str(key), int(message_id)) for chat_id, key, message_id in rows]
 
     @staticmethod
     async def sent_since(session: AsyncSession, dedup_key: str, since: datetime) -> bool:

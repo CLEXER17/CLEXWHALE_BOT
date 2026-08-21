@@ -231,6 +231,11 @@ class AlertHistory(Base):
     id: Mapped[int] = mapped_column(_PK, primary_key=True, autoincrement=True)
     event_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     dedup_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    #: Groups alerts that belong together so a follow-up can be sent as a
+    #: Telegram reply to the first message of the thread. Currently
+    #: ``wallet:coin`` (lower case) or ``coin`` when the event carries no
+    #: wallet; nullable because book-level alerts have neither.
+    thread_key: Mapped[str | None] = mapped_column(String(96), index=True)
     chat_id: Mapped[int | None] = mapped_column(_TG_ID)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

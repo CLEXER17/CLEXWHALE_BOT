@@ -15,8 +15,10 @@ Telegram message. Every optional field is read through its
 
 **Delivery** is a single serialised sender task draining a bounded queue, so a
 burst of detections cannot fan out into a burst of Telegram calls. Administrators
-always receive alerts; ordinary subscribers receive them only while public mode
-is on. Each chat has its own token bucket, every send is written to
+receive alerts unless they sent ``/stop``; ordinary subscribers receive them only
+while public mode is on. Follow-up alerts for a wallet+coin are sent as Telegram
+replies to the first alert of that thread, so a chat reads as one conversation
+per position. Each chat has its own token bucket, every send is written to
 ``alert_history``, and a user who has blocked the bot is marked so we stop
 trying.
 """
@@ -50,7 +52,6 @@ from app.utils.formatting import (
     fmt_time,
     fmt_usd,
     fmt_usd_full,
-    short_wallet,
     utc_now,
 )
 from app.utils.logging import get_logger
@@ -64,6 +65,13 @@ QUEUE_MAX = 500
 INTER_CHAT_DELAY = 0.06
 RECIPIENT_CACHE_TTL = 30.0
 FOOTER = "🐋 Whale Monitor"
+
+#: How long a reply thread stays open. A wallet that goes quiet for longer starts
+#: a fresh thread rather than replying to a message far up the chat history.
+THREAD_TTL = timedelta(hours=12)
+#: Upper bound on the in-memory thread map, so a busy day cannot grow it without
+#: limit. Oldest entries are discarded first.
+THREAD_MAX = 2000
 
 #: Header per event type. Position openings and large trades use the canonical
 #: signal format; lifecycle changes get their own headline.
@@ -103,6 +111,26 @@ def _short_reason(note: str | None) -> str:
     return text if len(text) <= 60 else text[:57] + "..."
 
 
+def _is_missing_reply(exc: BadRequest) -> bool:
+    """True when Telegram refused a reply because the target message is gone."""
+    text = str(exc).lower()
+    return "reply" in text and ("not found" in text or "message to be replied" in text)
+
+
+def thread_key_for(event: WhaleEvent) -> str | None:
+    """Which conversation an alert belongs to.
+
+    One thread per wallet **and** coin: a whale running BTC and ETH positions
+    produces two readable threads instead of one interleaved one. Book-level
+    events carry no wallet (Hyperliquid aggregates the book anonymously), so they
+    are never threaded — pretending otherwise would imply an attribution that
+    does not exist.
+    """
+    if not event.wallet:
+        return None
+    return f"{event.wallet.lower()}:{event.coin.upper()}"[:96]
+
+
 @dataclass(slots=True)
 class _AlertJob:
     event_type: str
@@ -110,6 +138,7 @@ class _AlertJob:
     dedup_key: str
     text: str
     event_id: int | None = None
+    thread_key: str | None = None
     queued_at: datetime = field(default_factory=utc_now)
 
 
@@ -146,6 +175,10 @@ class AlertService:
         self._recipients: list[_Recipient] = []
         self._recipients_at: datetime | None = None
 
+        #: ``(chat_id, thread_key) -> (message_id, last_used)``. The root message
+        #: every follow-up alert for that wallet/coin replies to.
+        self._threads: dict[tuple[int, str], tuple[int, datetime]] = {}
+
         # counters surfaced through /status and /health
         self.queued = 0
         self.dropped = 0
@@ -164,6 +197,7 @@ class AlertService:
         if self._running:
             return
         self._running = True
+        await self._warm_threads()
         self._sender = asyncio.create_task(self._sender_loop(), name="alert-sender")
         log.info("Alert service started", extra={"rate_per_minute": self.env.alert_rate_per_minute})
 
@@ -198,6 +232,7 @@ class AlertService:
             dedup_key=event.dedup_key,
             text=text,
             event_id=event_id,
+            thread_key=thread_key_for(event),
         )
         try:
             self._queue.put_nowait(job)
@@ -466,8 +501,12 @@ class AlertService:
     def _trader_line(self, event: WhaleEvent) -> str:
         if not event.wallet:
             return "👤 <b>Trader:</b> N/A"
+        # The full checksum-less address, not an abbreviation: an alert is only
+        # actionable if the reader can copy the address into a block explorer.
+        # ``short_wallet`` stays for the compact list views, where a truncated
+        # address is a layout choice rather than a loss of information.
         # Address only: no identity is claimed for any wallet (spec §20).
-        return f"👤 <b>Trader:</b> <code>{escape_html(short_wallet(event.wallet))}</code>"
+        return f"👤 <b>Trader:</b> <code>{escape_html(event.wallet.lower())}</code>"
 
     def _time_line(self, event: WhaleEvent) -> str:
         label = "Opened" if event.event_type is EventType.POSITION_OPENED else "Detected"
@@ -511,7 +550,12 @@ class AlertService:
                 self.throttled += 1
                 results.append((recipient, None, "throttled: per-chat rate limit"))
                 continue
-            message_id, error = await self._send(recipient, job.text)
+            reply_to = self._thread_root(recipient.chat_id, job.thread_key)
+            message_id, error = await self._send(recipient, job.text, reply_to=reply_to)
+            if message_id is not None:
+                # The root of a thread is its first message: only remember this
+                # one when there is nothing to reply to yet.
+                self._remember_thread(recipient.chat_id, job.thread_key, message_id, reply_to)
             results.append((recipient, message_id, error))
             await asyncio.sleep(INTER_CHAT_DELAY)
 
@@ -528,7 +572,9 @@ class AlertService:
                 extra={"throttled_total": self.throttled},
             )
 
-    async def _send(self, recipient: _Recipient, text: str) -> tuple[int | None, str | None]:
+    async def _send(
+        self, recipient: _Recipient, text: str, *, reply_to: int | None = None
+    ) -> tuple[int | None, str | None]:
         assert self.bot is not None
         for attempt in (1, 2):
             try:
@@ -537,6 +583,7 @@ class AlertService:
                     text=text,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
+                    reply_to_message_id=reply_to,
                 )
                 return message.message_id, None
             except RetryAfter as exc:
@@ -554,6 +601,16 @@ class AlertService:
                 log.info("Recipient blocked the bot", extra={"chat_id": recipient.chat_id})
                 return None, "Forbidden: bot blocked by recipient"
             except BadRequest as exc:
+                # The root message may have been deleted by the reader. That must
+                # cost the alert itself, not just its thread, so retry unthreaded.
+                if reply_to is not None and _is_missing_reply(exc):
+                    self._forget_thread(recipient.chat_id, reply_to)
+                    log.info(
+                        "Reply target is gone; sending the alert unthreaded",
+                        extra={"chat_id": recipient.chat_id},
+                    )
+                    reply_to = None
+                    continue
                 self.failed += 1
                 log.error(
                     "Telegram rejected an alert",
@@ -587,6 +644,7 @@ class AlertService:
                         event_id=job.event_id,
                         chat_id=recipient.chat_id,
                         message_id=message_id,
+                        thread_key=job.thread_key,
                         ok=error is None,
                         error=error,
                     )
@@ -597,6 +655,60 @@ class AlertService:
                         await EventRepository.mark_alerted(session, job.event_id)
         except Exception:
             log.exception("Could not record alert history", extra={"event": job.event_type})
+
+    # ── reply threading ───────────────────────────────────────
+    def _thread_root(self, chat_id: int, thread_key: str | None) -> int | None:
+        """The message this alert should reply to, if the thread is still fresh."""
+        if not thread_key:
+            return None
+        entry = self._threads.get((chat_id, thread_key))
+        if entry is None:
+            return None
+        message_id, last_used = entry
+        if utc_now() - last_used > THREAD_TTL:
+            self._threads.pop((chat_id, thread_key), None)
+            return None
+        return message_id
+
+    def _remember_thread(
+        self, chat_id: int, thread_key: str | None, message_id: int, replied_to: int | None
+    ) -> None:
+        if not thread_key:
+            return
+        key = (chat_id, thread_key)
+        now = utc_now()
+        if replied_to is not None:
+            # Keep the root and only refresh its recency, so a long-running
+            # position stays one flat thread instead of a chain of replies.
+            self._threads[key] = (replied_to, now)
+            return
+        self._threads[key] = (message_id, now)
+        while len(self._threads) > THREAD_MAX:
+            self._threads.pop(next(iter(self._threads)))
+
+    def _forget_thread(self, chat_id: int, message_id: int) -> None:
+        for key, (root, _at) in list(self._threads.items()):
+            if key[0] == chat_id and root == message_id:
+                self._threads.pop(key, None)
+
+    async def _warm_threads(self) -> None:
+        """Restore threading after a restart so a redeploy does not orphan it."""
+        try:
+            async with self.db.session() as session:
+                rows = await AlertRepository.thread_roots(session, utc_now() - THREAD_TTL)
+        except Exception:
+            log.exception("Could not warm alert reply threads")
+            return
+        now = utc_now()
+        for chat_id, thread_key, message_id in rows:
+            # Rows arrive oldest first and ``setdefault`` keeps the first one, so
+            # the thread is anchored to its earliest still-recent message rather
+            # than chaining replies onto replies.
+            self._threads.setdefault((chat_id, thread_key), (message_id, now))
+        while len(self._threads) > THREAD_MAX:
+            self._threads.pop(next(iter(self._threads)))
+        if self._threads:
+            log.info("Restored alert reply threads", extra={"threads": len(self._threads)})
 
     async def _mark_blocked(self, telegram_id: int) -> None:
         try:
@@ -622,10 +734,20 @@ class AlertService:
         recipients: list[_Recipient] = []
         seen: set[int] = set()
 
-        # Administrators always receive alerts. A Telegram user's private chat id
-        # equals their user id, so no lookup is needed.
+        # Explicit opt-outs (/stop, or the bot blocked) are honoured for everyone,
+        # administrators included: "send me nothing" is a personal preference, not
+        # a permission level. A user with no row has never opted out.
+        opted_out: set[int] = set()
+        try:
+            async with self.db.session() as session:
+                opted_out = await UserRepository.unsubscribed_ids(session)
+        except Exception:
+            log.exception("Could not load alert opt-outs; alerting everyone")
+
+        # Administrators receive alerts unless they opted out. A Telegram user's
+        # private chat id equals their user id, so no lookup is needed.
         for admin_id in self.admins.admin_ids:
-            if admin_id and admin_id not in seen:
+            if admin_id and admin_id not in seen and admin_id not in opted_out:
                 seen.add(admin_id)
                 recipients.append(_Recipient(admin_id, admin_id, True))
 
@@ -633,7 +755,7 @@ class AlertService:
             try:
                 async with self.db.session() as session:
                     for user in await UserRepository.subscribers(session):
-                        if user.telegram_id in seen:
+                        if user.telegram_id in seen or user.telegram_id in opted_out:
                             continue
                         seen.add(user.telegram_id)
                         recipients.append(
@@ -657,6 +779,7 @@ class AlertService:
             "throttled": self.throttled,
             "blocked": self.blocked,
             "recipients": len(self._recipients),
+            "threads": len(self._threads),
             "bot_attached": self.bot is not None,
             "last_sent_at": self.last_sent_at.isoformat() if self.last_sent_at else None,
         }
