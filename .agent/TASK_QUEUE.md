@@ -17,16 +17,39 @@ the code exists **and** has been exercised (run, migrated, or tested).
 [✓] 011 — Settings / admin / alert services
 [✓] 012 — Telegram bot: commands, panel, callbacks, prompts, permissions
 [✓] 013 — Entry point: migrations on boot, /health, graceful shutdown
-[✓] 014 — Test suite (unit + integration, spec §36) — 379 passed, 0 failed
+[✓] 014 — Test suite (unit + integration, spec §36) — 392 passed, 0 failed
 [✓] 015 — README + API notes + test status (spec §51/§52)
 [✓] 016 — Production checklist pass (spec §54)
-[~] 017 — Push to GitHub and deploy on Railway
+[✓] 017 — Push to GitHub and deploy on Railway
          [✓] GitHub: origin = https://github.com/CLEXER17/CLEXWHALE_BOT
-             main -> origin/main, 7 commits. The remote was verified empty
-             before the first push, so nothing was overwritten.
-         [ ] Railway: needs the user's account, a PostgreSQL add-on, and
-             BOT_TOKEN / MAIN_ADMIN_ID set as Railway variables. No credential
-             lives in this repository and none may be added to it.
+             main -> origin/main. The remote was verified empty before the
+             first push, so nothing was overwritten.
+         [✓] Railway: one service + PostgreSQL add-on, DATABASE_URL as a
+             reference, BOT_TOKEN / MAIN_ADMIN_ID as Railway variables. The
+             container started, migrations applied, /health served, Hyperliquid
+             connected. No credential lives in this repository.
+[~] 018 — Confirm live alert delivery
+         [✓] Defect: every alert dropped ("Telegram bot not attached yet").
+             Fixed in aa910bc; regression test proven to fail without it.
+         [✓] Defect: secret redaction broke %d log placeholders into traceback
+             storms. Fixed in c965da9; same proof.
+         [ ] Redeploy shows "Telegram connected" and no "Alert dropped".
+         [ ] A whale above the threshold actually arrives in Telegram.
+         [ ] Token rotated after being exposed in a chat transcript (user).
+```
+
+## 018 breakdown — in progress
+
+```
+[✓] root-caused from the Railway log rather than guessed: PTB calls post_init
+    only from run_polling/run_webhook (Application.initialize docstring)
+[✓] fix verified necessary by stashing it and watching the new test fail with
+    the production symptom (container.alerts.bot is None)
+[✓] logging fix reproduces the exact production TypeError before the fix
+[✓] production log path smoke-tested with LOG_JSON=true and registered secrets:
+    clean JSON, token and DB password both ***REDACTED***
+[✓] full suite re-run: 392 passed, 0 failed, 0 skipped
+[ ] live confirmation — only the running deployment can give this
 ```
 
 ## 014 breakdown — complete
@@ -46,7 +69,10 @@ the code exists **and** has been exercised (run, migrated, or tested).
 [✓] tests/test_database.py     — repositories round-trip, main admin protection
 [✓] tests/test_resilience.py   — WS reconnect/backoff, REST failure, rate limits
 [✓] tests/test_engine_pipeline.py — end-to-end trade → alert integration
-[✓] run: ./.venv/Scripts/python.exe -m pytest -q  → 379 passed in 43.00s
+[✓] tests/test_bot_application.py — the real PTB Application: bot attached to
+                                 the alert service, container published, every
+                                 command registered, post_init idempotent
+[✓] run: ./.venv/Scripts/python.exe -m pytest -q  → 392 passed in 33.45s
 ```
 
 Task 014 also produced the only `app/` change of this phase:

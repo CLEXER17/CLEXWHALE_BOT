@@ -4,6 +4,34 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-21 — First Railway deploy, and the two defects it exposed
+
+The container started, migrations ran against PostgreSQL, `/health` came up and
+the whale engine connected to Hyperliquid — but two defects only a live process
+could show up.
+
+- **Every alert was dropped.** The log repeated `Alert dropped: Telegram bot not
+  attached yet`, and the command menu never appeared in Telegram.
+  `AlertService.attach_bot()` was only reachable from the application's
+  `post_init` hook, and python-telegram-bot calls `post_init` **only** from
+  `run_polling()` / `run_webhook()`; `app.main.Runtime` drives the lifecycle step
+  by step, so the hook never ran. `build_application()` now attaches the bot
+  directly, and `post_init` is public, called explicitly by `Runtime.start()`
+  after `initialize()`, and guarded so it cannot publish the menu twice.
+- **Secret redaction corrupted `%`-style log arguments.** `SecretRedactor`
+  coerced every `record.args` entry to `str`, so uvicorn's
+  `"Started server process [%d]"` raised `TypeError: %d format: a real number is
+  required, not str` inside the formatter — and Python answers a formatter
+  exception with a full traceback, so two startup lines became screens of noise.
+  `_scrub_arg()` now preserves argument types and only substitutes a non-string
+  when it actually carries a secret; both formatters resolve the message through
+  `_safe_message()`. Redaction coverage is unchanged and now tested with args.
+- **New module `tests/test_bot_application.py`** (6 tests): nothing had ever built
+  the real `Application`, which is exactly why defect 1 reached production. Suite
+  is now **392 passed, 0 failed, 0 skipped**. Both fixes were verified to be
+  necessary by stashing them and watching the new tests fail with the production
+  symptoms.
+
 ## 2026-08-21 — Published to GitHub
 
 - Remote connected and `main` pushed:

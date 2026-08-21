@@ -5,74 +5,60 @@ this file plus the repository alone. Read `.agent/NOW.md` first — it is smalle
 
 ## Current Objective
 
-Deployment. GitHub is done; Railway is the user's step.
+Confirm that alerts actually reach Telegram on the live Railway deployment.
 
 ## Current Phase
 
-Phase 15 of 15. Everything is implemented, tested (379 passed, 0 failed,
+Phase 15 of 15. Everything is implemented, tested (392 passed, 0 failed,
 0 skipped), documented, committed and **pushed** to
 <https://github.com/CLEXER17/CLEXWHALE_BOT> (`main` tracks `origin/main`):
 foundation, config, database + migrations, Hyperliquid REST/WS clients, whale
 pipeline (parser → tracker → detector → filter → dedup), services
 (settings, admin/permissions, alerts), Telegram surface, entry point,
 deployment surface (Dockerfile / railway.toml / start.sh), project memory,
-and the full §36 test suite. **Railway deployment has not been performed.**
+and the full §36 test suite. **The bot has been deployed and has run on
+Railway**; the first run exposed two defects, both now fixed and pushed.
 
 ## What Was Just Completed
 
-- `tests/` **exists and passes**: 11 test modules, 379 tests, 0 failed,
-  0 skipped. Offline — no Hyperliquid connection, no Telegram API, no Postgres.
-- `tests/test_engine_pipeline.py` (22 tests) drives a raw `trades` websocket
-  frame through the real pipeline and asserts the final Telegram message text
-  plus the rows persisted.
-- One **real production defect** found by that test and fixed:
-  `WhaleEngine._persist` ran in three concurrent workers, so two events for the
-  same wallet raced on the read-then-write of `wallets` / `positions`; the loser's
-  transaction failed and **its alert was never sent**. Fixed with
-  `WhaleEngine._write_lock` (`app/whale/engine.py`), held only around the DB
-  write, not around REST enrichment. This is the only change to `app/` in this
-  phase.
-- `.agent/API_NOTES.md` — per-source availability, verified 2026-08-21, with
-  every missing field written as `NOT AVAILABLE FROM THIS DATA SOURCE`.
-- `.agent/TEST_STATUS.md` — real numbers, per-module timings, §36 coverage map,
-  and the suite's five known limitations.
-- Doc correction applied: **12 database tables, 11 repository classes** (verified
-  by counting `__tablename__` in `app/database/models.py` and
-  `^class .*Repository` in `app/database/repository.py`) in
-  `PROJECT_STATE.md` and `CHANGELOG.md`.
-- `README.md` — written, and every claim checked against source: the command
-  table comes from `app/bot/handlers/__init__.py::COMMANDS`, the permission
-  matrix from `app/services/admin_service.py`, the env table from `.env.example`,
-  the health states from `AppContainer.health`, the toggles from the real
-  `ENABLE_*` names.
+The two defects the first live deploy exposed — root-caused from the Railway log,
+fixed, and each covered by a regression test **verified to fail** against the
+code that shipped:
+
+1. **Every alert was dropped** (`Alert dropped: Telegram bot not attached yet`),
+   and the command menu never appeared. `AlertService.attach_bot()` was only
+   reachable from `post_init`, which PTB calls **only** from `run_polling` /
+   `run_webhook` — and `Runtime` drives the lifecycle by hand. Fixed in
+   `app/bot/application.py`: `build_application()` attaches the bot directly;
+   `post_init` is public, guarded, and called explicitly by `Runtime.start()`
+   after `initialize()`. New module `tests/test_bot_application.py` (6 tests) —
+   nothing had ever built the real `Application`, which is why this shipped.
+2. **Secret redaction corrupted `%`-style log args.** `SecretRedactor` coerced
+   every `record.args` entry to `str`, so uvicorn's `"Started server process
+   [%d]"` raised `TypeError` inside the formatter and Railway got screens of
+   logging tracebacks. Fixed in `app/utils/logging.py` with a type-preserving
+   `_scrub_arg()` and `_safe_message()`. Redaction coverage unchanged, and now
+   tested with args (including a secret hidden inside a non-string arg).
+
+Earlier in the phase: the full §36 suite, the `WhaleEngine._write_lock` fix it
+found, `README.md`, `API_NOTES.md`, `TEST_STATUS.md`, and the GitHub publish.
 
 ## What Is Half-Finished
 
-Nothing in code, nothing in documentation, nothing in version control. Seven
-commits are on `origin/main`:
+Nothing in code. One thing is unverified and cannot be verified from here:
+**live alert delivery**. The redeploy carrying `aa910bc` must show
+`Telegram connected` in the log and no `Alert dropped` lines, and a whale above
+`MIN_WHALE_VALUE` must actually arrive in the admin's chat.
 
-```
-test: add fixtures and unit coverage for config, detection and permissions
-test: add database persistence coverage
-test: add resilience coverage
-test: add end-to-end engine pipeline coverage   (+ the _write_lock fix)
-docs: add Hyperliquid API notes and test status
-docs: add production README
-docs: record the GitHub remote
-```
+If it still does not arrive, suspect recipients rather than wiring:
+`AlertService._resolve_recipients` sends to `admins.admin_ids`, so
+`MAIN_ADMIN_ID` must be the account watching, and that account must not have
+blocked the bot.
 
-The only remaining item is **Railway**, which this repository cannot do for the
-user:
-
-1. *New Project → Deploy from GitHub repo →* `CLEXER17/CLEXWHALE_BOT`
-2. *New → Database → PostgreSQL*
-3. On the bot service, set `DATABASE_URL` as a reference to
-   `${{Postgres.DATABASE_URL}}` — never a literal connection string
-4. Set `BOT_TOKEN` and `MAIN_ADMIN_ID`
-5. Deploy; migrations run on boot; watch `/health`; `/start` in Telegram
-
-Never paste a token or a connection string into this repository, a commit
-message, or any `.agent/` file.
+Also outstanding, and only the user can do it: **rotate the bot token**, which
+was exposed in a chat transcript. @BotFather → `/revoke` → new token into the
+Railway variable. Never paste a token or a connection string into this
+repository, a commit message, or any `.agent/` file.
 
 ## Exact Files Being Worked On
 
@@ -88,7 +74,7 @@ None.
 
 ## Last Command Run
 
-`git push -u origin main` → `* [new branch] main -> main`, tracking set.
+`git push origin main` → `ae50d7b..c965da9  main -> main`.
 
 Before that: `./.venv/Scripts/python.exe -m pytest -q`.
 
@@ -97,35 +83,46 @@ Note: the bare `python` on PATH is **not** the project interpreter and lacks
 
 ## Last Test Result
 
-**379 passed, 0 failed, 0 skipped.** Per-module counts in `TEST_STATUS.md`.
+**392 passed, 0 failed, 0 skipped.** Per-module counts in `TEST_STATUS.md`.
 
 ## Next Exact Action
 
-Railway, by the user — the five steps above. Nothing in this repository is
-waiting on an edit.
+Read the Railway log after the redeploy. Two positive signals and one negative:
+`Telegram connected` present, an alert delivered to the admin chat, and no
+`Alert dropped: Telegram bot not attached yet`.
 
-After the first live deploy, the one useful follow-up is to compare real
-Hyperliquid payload shapes against `.agent/API_NOTES.md` and correct that file if
-anything differs. Do not pre-emptively "fix" it from memory.
+Nothing in this repository is waiting on an edit. After a clean live run, the one
+useful follow-up is to compare real Hyperliquid payload shapes against
+`.agent/API_NOTES.md` and correct that file if anything differs. Do not
+pre-emptively "fix" it from memory.
 
 ## Do NOT Redo
 
 - Do not rewrite anything under `app/` — complete, committed, and green.
-- Do not recreate any `tests/` module. All 11 exist and pass.
+- Do not recreate any `tests/` module. All 12 exist and pass.
 - Do not recreate `README.md`, `API_NOTES.md` or `TEST_STATUS.md`.
+- Do not move `attach_bot()` back into `post_init`. That was the production bug;
+  see `DECISIONS.md`.
+- Do not "simplify" `SecretRedactor._scrub_arg` back to `str(a)`. That was the
+  other production bug.
 - Do not re-run Alembic autogenerate: `0001_initial.py` is hand-written on
   purpose (autogenerate emitted SQLite-flavoured DDL). See `DECISIONS.md`.
 - Do not commit `_boot.db`, `render_preview.txt`, `.pytest_cache/`, `.venv/` or
   `.env`. `.gitignore` already excludes all of them (`*.db` catches `_boot.db`,
   and `render_preview.txt` is named explicitly).
-- **Do not re-push history.** `origin/main` already has all seven commits;
-  `git push` for new work only, never `--force`.
-- **Do not attempt the Railway deployment.** It requires the user's own account
-  and their own `BOT_TOKEN` / `MAIN_ADMIN_ID`. Never invent, guess or embed a
-  credential to get past that.
+- **Do not re-push history.** `git push` for new work only, never `--force`.
+- **Do not attempt Railway changes.** They need the user's own account and their
+  own `BOT_TOKEN` / `MAIN_ADMIN_ID`. Never invent, guess or embed a credential.
 
 ## Important Technical Context
 
+- **PTB does not call `post_init` unless you use `run_polling`/`run_webhook`.**
+  This process calls `initialize()` / `start()` / `updater.start_polling()`
+  itself, so anything that must happen once at startup has to be invoked by
+  `Runtime.start()` explicitly. This cost a whole deploy's worth of alerts.
+- **The log filter must never change an argument's type.** `record.args` feeds
+  `msg % args`; a stringified int breaks `%d` in third-party log calls and Python
+  answers with a traceback per line.
 - Repositories are classes of `@staticmethod`s taking an `AsyncSession`
   (`await SettingsRepository.set(session, key, value)`), used inside
   `async with db.session() as session:`.

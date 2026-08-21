@@ -136,3 +136,33 @@ PostgreSQL in production.
 `engine._queue.join()` and `alerts._queue.join()`. This makes "no alert was
 produced" a real assertion instead of a race, and keeps the end-to-end suite
 deterministic and fast.
+
+**DECISION:** Attach the Telegram bot to the alert service inside
+`build_application()`, and treat `post_init` as identity-dependent work only.
+**REASON:** python-telegram-bot calls `post_init` **only** from `run_polling()`
+and `run_webhook()` — `Application.initialize()` explicitly does not. This
+process manages the lifecycle itself (`initialize` → `start` →
+`updater.start_polling`), so the hook never ran in production and
+`AlertService.bot` stayed `None`; `_dispatch` treats that as "drop the alert", so
+every whale alert was discarded and the command menu was never published.
+`application.bot` exists the moment the builder returns, so attaching there
+removes the ordering hazard entirely rather than moving it. `post_init` remains
+for what genuinely needs `getMe` (identity logging, `set_my_commands`), is called
+explicitly by `Runtime.start()`, is still registered on the builder so
+`run_polling` would also work, and is guarded by a `bot_data` flag so the double
+call cannot publish the menu twice.
+
+**DECISION:** The secret redactor preserves the type of every `record.args`
+entry; only strings are scrubbed unconditionally.
+**REASON:** `record.args` is consumed as `msg % args`. Coercing entries to `str`
+broke every numeric placeholder in third-party log calls — uvicorn's
+`"Started server process [%d]"` raised `TypeError` inside the formatter, and
+Python answers a formatter exception with a full traceback on stderr, so two
+startup lines buried the real log under screens of noise. A non-string argument
+is now inspected and replaced **only** when it actually contains a registered
+secret, where returning a redacted string is correct regardless of the
+placeholder. Leaking is still impossible; the type is preserved only in the case
+where there is nothing to redact. Both formatters also route through
+`_safe_message()`, so a malformed third-party template degrades to a single line
+instead of a traceback per occurrence — logging must never be able to drown the
+signal it exists to carry.

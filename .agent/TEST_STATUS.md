@@ -4,8 +4,11 @@ These are **actual** results from running the suite, not estimates. Reproduce
 with:
 
 ```bash
-python -m pytest -q
+./.venv/Scripts/python.exe -m pytest -q
 ```
+
+The bare `python` on PATH is **not** the project interpreter and lacks
+`pytest_asyncio`. On Linux/macOS the equivalent is `.venv/bin/python -m pytest -q`.
 
 Last full run: **2026-08-21**
 Environment: Python 3.13.3, pytest 8.4.2, `asyncio_mode = auto`,
@@ -16,18 +19,19 @@ required.
 
 | | |
 |---|---|
-| **TOTAL** | **379** |
-| **PASSED** | **379** |
+| **TOTAL** | **392** |
+| **PASSED** | **392** |
 | **FAILED** | **0** |
 | **SKIPPED** | **0** |
 | xfailed / errors | 0 |
-| Wall time | 38.31 s |
+| Wall time | 33.45 s |
 
 ## Per module (each run on its own)
 
 | Module | Tests | Result | Time |
 |---|---|---|---|
-| `tests/test_config.py` | 27 | 27 passed | 0.08 s |
+| `tests/test_bot_application.py` | 6 | 6 passed | 1.81 s |
+| `tests/test_config.py` | 34 | 34 passed | 0.07 s |
 | `tests/test_database.py` | 68 | 68 passed | 4.58 s |
 | `tests/test_dedup.py` | 21 | 21 passed | 0.12 s |
 | `tests/test_detector_orders.py` | 23 | 23 passed | 0.03 s |
@@ -64,7 +68,7 @@ Hyperliquid shapes).
 | Invalid command input | `test_telegram_handlers.py`, `test_config.py` |
 | Unauthorized user rejection | `test_permissions.py`, `test_telegram_handlers.py` |
 | Unit tests | all modules |
-| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py` |
+| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py`, `test_bot_application.py` |
 
 ## What the end-to-end pipeline test actually asserts
 
@@ -81,7 +85,9 @@ a price, a checked wallet with no triggers renders `N/A`, and an unchecked walle
 renders `N/A (not checked)` — so an unavailable value can never be printed as a
 real one.
 
-## Defect this suite found (fixed)
+## Defects this suite found (fixed)
+
+### 1. Concurrent-write race dropped alerts
 
 `WhaleEngine._persist` ran in three concurrent workers. Two events for the same
 wallet in flight at once raced on the read-then-write of the `wallets` /
@@ -91,6 +97,55 @@ wallet in flight at once raced on the read-then-write of the `wallets` /
 `test_a_zero_cooldown_lets_every_distinct_trade_through` (0 alerts instead of 2).
 Fixed by `WhaleEngine._write_lock` (`app/whale/engine.py:124`), held only around
 the database write and not around REST enrichment.
+
+## Defects found in production (fixed, now covered)
+
+Both were found on the first Railway deploy, 2026-08-21 — not by this suite.
+Each now has a regression test that was **verified to fail** against the code
+that shipped.
+
+### 2. Every alert was dropped: the bot was never attached
+
+The log showed `Alert dropped: Telegram bot not attached yet` for every whale
+detected, and the command menu never appeared in Telegram.
+`AlertService.attach_bot()` was only reachable from the application's
+`post_init` hook, but python-telegram-bot calls `post_init` **only** from
+`run_polling()` / `run_webhook()` (see `Application.initialize`: *"Does not call
+post_init"*). `app.main.Runtime` drives the lifecycle by hand, so the hook never
+ran and `AlertService.bot` stayed `None`, which `_dispatch` treats as "drop".
+
+Fixed in `app/bot/application.py`: `build_application()` attaches the bot
+immediately, and `post_init` is now public, called explicitly by
+`Runtime.start()`, and guarded against a double call.
+
+**Why the suite missed it:** every other Telegram test drives handlers through
+the duck-typed fakes in `conftest.py`, so no test had ever built the real
+`Application`. `tests/test_bot_application.py` now does, and asserts
+`container.alerts.bot is application.bot`.
+
+### 3. Secret redaction corrupted `%`-style log arguments
+
+`SecretRedactor.filter` coerced every `record.args` entry to `str`, so any
+third-party log call using a numeric placeholder raised inside the formatter:
+
+```
+TypeError: %d format: a real number is required, not str
+Message: 'Started server process [%d]'
+Arguments: ('1',)
+```
+
+Python answers a formatter exception with a full traceback on stderr, so
+uvicorn's two startup lines produced several screens of interleaved tracebacks.
+
+Fixed in `app/utils/logging.py`: `_scrub_arg()` preserves each argument's type
+and only substitutes a non-string when it genuinely contains a secret; both
+formatters resolve the message through `_safe_message()`, so a malformed
+third-party call degrades to one line instead of a traceback per occurrence.
+
+**Why the suite missed it:** the redaction tests only ever used pre-formatted
+messages with no `args`. Six new tests in `test_config.py` cover numeric args,
+mixed args, dict-style args, secrets passed as args, secrets hidden inside
+non-string args, and both formatters' degradation path.
 
 ## Known limitations of this suite
 
@@ -113,3 +168,8 @@ the database write and not around REST enrichment.
 5. **Docker image and Railway deployment are not tested here.** Both are verified
    by inspection (`Dockerfile`, `railway.toml`, `start.sh`) and by the `/health`
    tests in `test_resilience.py`, not by building the image in CI.
+6. **The process lifecycle is not driven end to end.** `test_bot_application.py`
+   covers the wiring (`build_application`, `post_init`), but no test runs
+   `Runtime.start()` — that needs a real database, a real Telegram login and a
+   bound port. Defect 2 above lived exactly in that gap, so treat any change to
+   the startup order in `app/main.py` as untested until it has run on Railway.

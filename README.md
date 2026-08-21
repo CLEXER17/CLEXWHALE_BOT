@@ -84,7 +84,7 @@ trust a field.
   websocket that reconnects with jittered exponential backoff and replays its
   full subscription set.
 * Structured logging (optional JSON), with secrets never logged.
-* 379 automated tests, no network required.
+* 392 automated tests, no network required.
 
 ---
 
@@ -538,13 +538,14 @@ Per-endpoint detail, with verification dates and every field marked
 python -m pytest -q
 ```
 
-**379 tests, all passing, no network access required** — no live Hyperliquid
+**392 tests, all passing, no network access required** — no live Hyperliquid
 connection and no Telegram API. The two network seams are substituted at the
 boundary; everything inside them is production code.
 
 | Module | Tests | Covers |
 |---|---|---|
-| `test_config.py` | 27 | Env parsing, missing required vars, invalid values |
+| `test_bot_application.py` | 6 | The real Telegram `Application`: bot attached to the alert service, handlers registered |
+| `test_config.py` | 34 | Env parsing, missing required vars, invalid values, secret redaction |
 | `test_database.py` | 68 | All 12 tables and 11 repositories, commit/rollback, restart restore |
 | `test_dedup.py` | 21 | Identity keys, cooldowns, magnitude buckets |
 | `test_detector_trades.py` | 17 | Large market trade classification |
@@ -574,7 +575,7 @@ app/
   services/           admin/permissions, settings, alerts
   database/           models, repositories, session factory, Alembic migrations
   utils/              logging, rate limiting, backoff, formatting
-tests/                379 tests + fixtures and factories
+tests/                392 tests + fixtures and factories
 .agent/               project memory: state, decisions, architecture, API notes, test status
 Dockerfile            python:3.13-slim, non-root, health check
 railway.toml          single service, Dockerfile builder, /health, 1 replica

@@ -12,12 +12,20 @@ Read this file first. The repository is the source of truth; this file records
 **PHASE 15 — DEPLOYMENT** (spec §54/§55)
 
 Phases 1–14 are implemented and verified, including the full §36 test suite
-(**379 passed, 0 failed, 0 skipped**) and all documentation. The repository is
+(**392 passed, 0 failed, 0 skipped**) and all documentation. The repository is
 published at **<https://github.com/CLEXER17/CLEXWHALE_BOT>** and `main` tracks
-`origin/main`. **Railway deployment has not been performed** — it needs the
-user's Railway account, a PostgreSQL add-on, and `BOT_TOKEN` / `MAIN_ADMIN_ID`
-set as Railway variables. No credential exists in this repository and none may
-be added to it.
+`origin/main`. **The bot has been deployed on Railway and has run**: PostgreSQL
+migrations applied, `/health` up, Hyperliquid websocket connected, whale events
+detected.
+
+That first run exposed two defects no offline test could reach — every alert was
+dropped because the Telegram bot was never attached to the alert service, and
+the secret redactor corrupted `%`-style log arguments into traceback storms. Both
+are fixed, regression-tested, and pushed (`aa910bc`, `c965da9`). **Alert delivery
+has not yet been confirmed live**; that needs the redeploy plus a whale above the
+threshold.
+
+No credential exists in this repository and none may be added to it.
 
 ---
 
@@ -45,31 +53,43 @@ be added to it.
 - Entry point with migrations-on-boot, `/health`, graceful SIGTERM shutdown
 - Dockerfile, `railway.toml` (one service), `start.sh`, `.env.example`
 - Git repository initialised with logical commits
-- **Test suite (spec §36): 11 modules, 379 tests, all passing offline** — no
+- **Test suite (spec §36): 12 modules, 392 tests, all passing offline** — no
   Hyperliquid connection, no Telegram API, no PostgreSQL required
 - **`WhaleEngine._write_lock`** — fix for a concurrent-write race found by the
   end-to-end pipeline test, which silently dropped alerts (see `DECISIONS.md`)
 - **Documentation**: `README.md`, `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`
+- **First live deploy on Railway**, and the two defects it exposed: the alert
+  service was never given a bot (PTB does not run `post_init` under a manual
+  lifecycle), and secret redaction broke `%d` log placeholders. Both fixed with
+  regression tests proven to fail against the shipped code
 
 ## CURRENTLY WORKING ON
 
-- Nothing. Awaiting the Railway deployment, which only the user can perform.
+- Nothing. Waiting on the redeploy to confirm alerts actually reach Telegram.
 
 ## NEXT TASK
 
-1. Railway: *Deploy from GitHub repo* → `CLEXER17/CLEXWHALE_BOT` → add
-   PostgreSQL → reference `${{Postgres.DATABASE_URL}}` → set `BOT_TOKEN` and
-   `MAIN_ADMIN_ID` → deploy → watch `/health` → `/start` in Telegram
-2. After the first live run, record real observations in `API_NOTES.md` if any
-   payload shape differs from what is documented there
+1. **Revoke the bot token.** It was pasted into a chat transcript, so it must be
+   treated as compromised: @BotFather → `/revoke` → put the new token in the
+   Railway variable.
+2. Confirm the redeploy: the log must contain `Telegram connected` and must not
+   contain `Alert dropped: Telegram bot not attached yet`.
+3. If alerts still do not arrive, look at recipients rather than wiring —
+   `AlertService._resolve_recipients` sends to `admins.admin_ids`, so
+   `MAIN_ADMIN_ID` must match the watching account.
+4. After a clean live run, record any payload shape that differs from
+   `API_NOTES.md` — and correct the file rather than the observation.
 
 ---
 
 ## FILES MODIFIED (this phase)
 
 - `app/whale/engine.py` — added `_write_lock` around the persistence write
-  (the only `app/` change since Phase 13)
-- `tests/*` (new — complete, 379 tests)
+- `app/bot/application.py` — attach the bot at build time; `post_init` made
+  public, guarded and explicitly invoked
+- `app/main.py` — `Runtime.start()` calls `post_init` after `initialize()`
+- `app/utils/logging.py` — type-preserving `_scrub_arg`, `_safe_message`
+- `tests/*` (new — complete, 392 tests, including `test_bot_application.py`)
 - `README.md` (new)
 - `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`, `.agent/NOW.md`,
   `.agent/HANDOFF.md`, `.agent/FILE_INDEX.md` (new)
@@ -123,7 +143,7 @@ rather than worked around with invented data.
 
 Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
 
-- **TOTAL 379 · PASSED 379 · FAILED 0 · SKIPPED 0** (43.00 s)
+- **TOTAL 392 · PASSED 392 · FAILED 0 · SKIPPED 0** (33.45 s)
 - Run with `./.venv/Scripts/python.exe -m pytest -q`. The bare `python` on PATH
   is not the project interpreter and lacks `pytest_asyncio`.
 - Unit tests: all 16 items of the spec §36 list are covered; the mapping from
@@ -134,6 +154,6 @@ Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
 - Alembic migration: verified manually (`upgrade head` → `downgrade base` →
   `upgrade head`). The suite runs on SQLite and does not execute the migration
   scripts.
-- Railway deployment: not yet performed. The GitHub remote now exists
-  (`CLEXER17/CLEXWHALE_BOT`); what is still missing is the user's Railway
-  project, its PostgreSQL add-on, and `BOT_TOKEN` / `MAIN_ADMIN_ID` set there.
+- Railway deployment: **performed, and the process ran.** Migrations applied to
+  PostgreSQL, `/health` served, Hyperliquid connected, whales detected. Alert
+  *delivery* is still unconfirmed pending the redeploy that carries `aa910bc`.

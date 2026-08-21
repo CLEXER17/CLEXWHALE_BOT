@@ -113,6 +113,7 @@ Line counts are approximate and only meant to signal "big file / small file".
 | `test_database.py` | Repository round-trips, main-admin protection, settings persistence |
 | `test_resilience.py` | WS reconnect/backoff, REST failure paths, rate limiting, bad frames |
 | `test_engine_pipeline.py` | Integration: trade frame → detect → filter → dedup → persist → alert |
+| `test_bot_application.py` | The real PTB `Application`: bot attached to the alert service, container published on `bot_data`, every command registered, `post_init` idempotent |
 
 ## Scripts (`scripts/`)
 
