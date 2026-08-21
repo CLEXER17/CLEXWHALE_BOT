@@ -123,6 +123,12 @@ class WhaleEngine:
 
         self._queue: asyncio.Queue[_Job] = asyncio.Queue(maxsize=QUEUE_MAX)
         self._tasks: list[asyncio.Task[None]] = []
+        # Several workers run concurrently and two events from the same wallet can
+        # be in flight at once. ``wallets`` and ``positions`` are read-then-write,
+        # so unsynchronised sessions race: one transaction loses on the primary
+        # key and its event — and therefore its alert — is dropped. The write is
+        # short and off the enrichment path, so serialising it costs nothing.
+        self._write_lock = asyncio.Lock()
         self._config_changed = asyncio.Event()
         self._running = False
         self.started_at: datetime | None = None
@@ -534,7 +540,7 @@ class WhaleEngine:
 
     async def _persist(self, event: WhaleEvent) -> int | None:
         try:
-            async with self.db.session() as session:
+            async with self._write_lock, self.db.session() as session:
                 row = await EventRepository.insert(session, **event.db_fields())
                 if event.wallet:
                     await WalletRepository.record_activity(
