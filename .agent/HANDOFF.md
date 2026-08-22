@@ -3,70 +3,93 @@
 Written for context compaction. A fresh agent should be able to continue from
 this file plus the repository alone. Read `.agent/NOW.md` first — it is smaller.
 
+**Do not restart the project. Do not recreate files that already exist. Do not
+remove working features.** The repository is the source of truth.
+
 ## Current Objective
 
-Confirm that alerts actually reach Telegram on the live Railway deployment.
+Resume the paused **verified execution + position lifecycle** task (39-section
+spec). The persistence + settings-safety task that preceded it is complete.
 
 ## Current Phase
 
-Phase 15 of 15. Everything is implemented, tested (392 passed, 0 failed,
-0 skipped), documented, committed and **pushed** to
-<https://github.com/CLEXER17/CLEXWHALE_BOT> (`main` tracks `origin/main`):
-foundation, config, database + migrations, Hyperliquid REST/WS clients, whale
-pipeline (parser → tracker → detector → filter → dedup), services
-(settings, admin/permissions, alerts), Telegram surface, entry point,
-deployment surface (Dockerfile / railway.toml / start.sh), project memory,
-and the full §36 test suite. **The bot has been deployed and has run on
-Railway**; the first run exposed two defects, both now fixed and pushed.
+Everything is implemented, tested (**555 passed, 0 failed**), documented and
+pushed to <https://github.com/CLEXER17/CLEXWHALE_BOT>: foundation, config,
+database + migrations, Hyperliquid REST/WS clients, whale pipeline (parser →
+tracker → detector → filter → dedup), services (settings, admin/permissions,
+alerts), Telegram surface, entry point, deployment surface (Dockerfile /
+railway.toml / start.sh), project memory and the test suite. The bot has run on
+Railway.
 
 ## What Was Just Completed
 
-The two defects the first live deploy exposed — root-caused from the Railway log,
-fixed, and each covered by a regression test **verified to fail** against the
-code that shipped:
+**The 34-section persistence + settings-safety fix.** Two reported production
+symptoms:
 
-1. **Every alert was dropped** (`Alert dropped: Telegram bot not attached yet`),
-   and the command menu never appeared. `AlertService.attach_bot()` was only
-   reachable from `post_init`, which PTB calls **only** from `run_polling` /
-   `run_webhook` — and `Runtime` drives the lifecycle by hand. Fixed in
-   `app/bot/application.py`: `build_application()` attaches the bot directly;
-   `post_init` is public, guarded, and called explicitly by `Runtime.start()`
-   after `initialize()`. New module `tests/test_bot_application.py` (6 tests) —
-   nothing had ever built the real `Application`, which is why this shipped.
-2. **Secret redaction corrupted `%`-style log args.** `SecretRedactor` coerced
-   every `record.args` entry to `str`, so uvicorn's `"Started server process
-   [%d]"` raised `TypeError` inside the formatter and Railway got screens of
-   logging tracebacks. Fixed in `app/utils/logging.py` with a type-preserving
-   `_scrub_arg()` and `_safe_message()`. Redaction coverage unchanged, and now
-   tested with args (including a secret hidden inside a non-string arg).
+1. **"changing one setting replaces other settings."** Root-caused to exactly one
+   path, not a systemic problem: the coin panel's `✏️ Set list` prompt
+   (`app/bot/handlers/prompts.py`, `kind == "coins"`) called
+   `settings.set_coins()`. An admin monitoring BTC/ETH/SOL who answered `HYPE`
+   was left monitoring only HYPE — a replacement dressed as an addition. It now
+   calls `add_coins()`; the button reads `➕ Add coins`; the prompt text says
+   "add". Everything else in the settings layer was already patch-based
+   (`set_value` writes one row and patches one field; `/addcoin`, `/removecoin`
+   and the per-coin toggles were already single-row).
+2. **"settings lost after a Railway redeploy."** The DB was already authoritative,
+   so this was hardening rather than a rewrite: a `bootstrapped_at` marker row now
+   records that this installation has been initialised, so `load()` seeds the
+   environment's coin list **only** while the marker is absent — an admin who
+   deliberately monitors nothing no longer gets `DEFAULT_COINS` resurrected.
+   `CoinRepository.replace` became a diff (returns `(added, removed)`) instead of
+   `DELETE FROM tracked_coins` + re-insert, so adding HYPE does not rewrite the
+   BTC row and two admins editing at once cannot undo each other.
 
-Earlier in the phase: the full §36 suite, the `WhaleEngine._write_lock` fix it
-found, `README.md`, `API_NOTES.md`, `TEST_STATUS.md`, and the GitHub publish.
+Also added: `/config` (reads the tables directly and flags cache-vs-database
+drift), `/resetsettings` (two-step, main-admin-only via a new
+`Capability.RESET_SETTINGS`), a two-step 🧹 Clear for the coin panel,
+`container.startup_summary()` and the plain-text startup block in `main.py`
+(counts and states only — never a token or a URL), and
+`tests/test_persistence.py` (29 tests).
+
+Before that: liquidation work (items 3 + 5) at `8d48846`, then the
+execution/lifecycle engine, detector and filter work at `31d8095`.
 
 ## What Is Half-Finished
 
-Nothing in code. One thing is unverified and cannot be verified from here:
-**live alert delivery**. The redeploy carrying `aa910bc` must show
-`Telegram connected` in the log and no `Alert dropped` lines, and a whale above
-`MIN_WHALE_VALUE` must actually arrive in the admin's chat.
+**The 39-section verified-execution / position-lifecycle task.** Engine, detector
+and filter are done and committed (`31d8095`). Remaining, in order:
 
-If it still does not arrive, suspect recipients rather than wiring:
+1. `app/services/alert_service.py` — `_render_trade` to the §4 format
+   (`🐋 WHALE TRADE`, `💰 Executed:`, `📦 Quantity:`, trader on its own line in
+   backticks and never truncated, bare `🕐 {fmt_time}`, `🔎 VERIFIED EXECUTION`,
+   footer `🐋 CLEXER WHALE MONITOR`), side-aware position headers, detection route
+   as its own `🧾 Route:` line.
+2. `/recent` and `/whales` filtered to `EXECUTION_EVENTS` only.
+3. Split `EventRepository.summary` metrics (§24), diagnostics counters (§25).
+4. The order-alerts toggle UI: `inline.alert_settings_panel` still toggles
+   `enable_order_detector` (internal tracking) and has **no**
+   `enable_order_alerts` switch. That is a real user-visible mismatch —
+   `app/bot/messages/texts.py:594-618` renders the same confusion.
+5. The 26 §31 regression tests, the §32 offline end-to-end test, the §33
+   six-step scenario for `0x31dea2516beee92135b96f464eeec3cf292a13f2`.
+
+Assertions that will need updating when the trade format changes:
+`tests/test_detector_liquidations.py:262,264` and
+`tests/test_engine_pipeline.py:263,264,270,286,624`.
+
+Unverifiable from here: **live alert delivery** on Railway. If alerts do not
+arrive, suspect recipients rather than wiring —
 `AlertService._resolve_recipients` sends to `admins.admin_ids`, so
-`MAIN_ADMIN_ID` must be the account watching, and that account must not have
-blocked the bot.
+`MAIN_ADMIN_ID` must be the account watching and must not have blocked the bot.
 
-Also outstanding, and only the user can do it: **rotate the bot token**, which
-was exposed in a chat transcript. @BotFather → `/revoke` → new token into the
-Railway variable. Never paste a token or a connection string into this
-repository, a commit message, or any `.agent/` file.
+Only the user can do: **rotate the bot token** (exposed in a chat transcript).
+@BotFather → `/revoke` → new token into the Railway variable. Never paste a token
+or a connection string into this repository, a commit message, or any `.agent/`
+file.
 
 ## Exact Files Being Worked On
 
-None. The working tree is clean and matches `origin/main`.
-
-## Exact Function/Class Being Worked On
-
-None — documentation and version control only.
+None mid-edit. Next to open: `app/services/alert_service.py`.
 
 ## Current Error
 
@@ -74,68 +97,89 @@ None.
 
 ## Last Command Run
 
-`git push origin main` → `ae50d7b..c965da9  main -> main`.
-
-Before that: `./.venv/Scripts/python.exe -m pytest -q`.
+`./.venv/Scripts/python.exe -m pytest -q` → 555 passed.
 
 Note: the bare `python` on PATH is **not** the project interpreter and lacks
 `pytest_asyncio`. Always use `./.venv/Scripts/python.exe`.
 
 ## Last Test Result
 
-**392 passed, 0 failed, 0 skipped.** Per-module counts in `TEST_STATUS.md`.
+**555 passed, 0 failed.** Per-module counts in `TEST_STATUS.md`.
 
 ## Next Exact Action
 
-Read the Railway log after the redeploy. Two positive signals and one negative:
-`Telegram connected` present, an alert delivered to the admin chat, and no
-`Alert dropped: Telegram bot not attached yet`.
-
-Nothing in this repository is waiting on an edit. After a clean live run, the one
-useful follow-up is to compare real Hyperliquid payload shapes against
-`.agent/API_NOTES.md` and correct that file if anything differs. Do not
-pre-emptively "fix" it from memory.
+Open `app/services/alert_service.py` and relabel `_render_trade` to the §4 format,
+then update the five stale assertions listed above and re-run the suite.
 
 ## Do NOT Redo
 
-- Do not rewrite anything under `app/` — complete, committed, and green.
-- Do not recreate any `tests/` module. All 12 exist and pass.
-- Do not recreate `README.md`, `API_NOTES.md` or `TEST_STATUS.md`.
-- Do not move `attach_bot()` back into `post_init`. That was the production bug;
-  see `DECISIONS.md`.
+- Do not rewrite anything under `app/` wholesale — it is complete and green.
+- Do not recreate any `tests/` module. Do not recreate `README.md`,
+  `API_NOTES.md` or `TEST_STATUS.md`.
+- **Do not make `prompts.py`'s `kind == "coins"` branch call `set_coins()` again.**
+  That was the reported "one change replaces my settings" bug.
+  `tests/test_persistence.py::test_the_add_coins_prompt_adds_instead_of_replacing`
+  is the guard.
+- **Do not turn `CoinRepository.replace` back into delete-all + re-insert.** It is
+  a diff on purpose; see `DECISIONS.md`.
+- **Do not add a startup write of defaults over existing rows.** `load()` seeds
+  only keys that are absent, and coins only while `bootstrapped_at` is unset.
+- **Do not add a UNIQUE constraint on `whale_events.dedup_key`.** Trade identity
+  already includes the exchange `tid`; a hard UNIQUE would permanently block a
+  legitimate repeat of an identical position change. Non-unique index plus the
+  1-hour `IDENTITY_TTL` is the mechanism.
+- Do not move `attach_bot()` back into `post_init`. That was a production bug.
 - Do not "simplify" `SecretRedactor._scrub_arg` back to `str(a)`. That was the
-  other production bug.
-- Do not re-run Alembic autogenerate: `0001_initial.py` is hand-written on
-  purpose (autogenerate emitted SQLite-flavoured DDL). See `DECISIONS.md`.
+  other one.
+- Do not re-run Alembic autogenerate: `0001_initial.py` is hand-written on purpose
+  (autogenerate emitted SQLite-flavoured DDL).
 - Do not commit `_boot.db`, `render_preview.txt`, `.pytest_cache/`, `.venv/` or
-  `.env`. `.gitignore` already excludes all of them (`*.db` catches `_boot.db`,
-  and `render_preview.txt` is named explicitly).
+  `.env`. `.gitignore` already excludes all of them.
 - **Do not re-push history.** `git push` for new work only, never `--force`.
 - **Do not attempt Railway changes.** They need the user's own account and their
   own `BOT_TOKEN` / `MAIN_ADMIN_ID`. Never invent, guess or embed a credential.
 
 ## Important Technical Context
 
+- **Settings are a patch, never a replacement.** `SettingsService.set_value()`
+  writes one row and rebuilds the frozen `RuntimeConfig` from the cache plus that
+  one field, under an `asyncio.Lock`. Anything new must follow that shape; do not
+  reconstruct the config from defaults.
+- **`SettingsService.first_boot` / `bootstrapped_at`** answer "should defaults
+  apply?" from a stored row rather than a guess. `startup_summary()["configuration"]`
+  surfaces it as `seeded` vs `loaded`, which is how an unexpected reset becomes
+  visible in the Railway log.
+- **`SettingsService.decode_stored()`** returns the raw text when JSON decoding
+  fails, so `/config` shows a corrupt row instead of hiding it behind a default.
+- `views.config_view()` reads `SettingsRepository.all` / `CoinRepository.enabled` /
+  `AdminRepository.list` / `WalletRepository.tracked` directly — never the cache,
+  or the panel would confirm itself.
+- **`AdminRepository`'s list method is `list`, not `list_all`.** `Database`
+  exposes `is_sqlite` and `stats()["dialect"]`; there is no `backend` attribute.
+- Restart vs redeploy in tests: a restart is `SettingsService(database, env)` +
+  `load()`; a redeploy is `AppContainer(env, database)` + `restore()`, both over
+  the same `Database`. `tests/test_persistence.py::redeploy` is the helper.
 - **PTB does not call `post_init` unless you use `run_polling`/`run_webhook`.**
-  This process calls `initialize()` / `start()` / `updater.start_polling()`
-  itself, so anything that must happen once at startup has to be invoked by
-  `Runtime.start()` explicitly. This cost a whole deploy's worth of alerts.
+  `Runtime.start()` invokes it explicitly.
 - **The log filter must never change an argument's type.** `record.args` feeds
-  `msg % args`; a stringified int breaks `%d` in third-party log calls and Python
-  answers with a traceback per line.
+  `msg % args`; a stringified int breaks `%d` in third-party log calls.
 - Repositories are classes of `@staticmethod`s taking an `AsyncSession`
   (`await SettingsRepository.set(session, key, value)`), used inside
   `async with db.session() as session:`.
 - `AdminService.can()` is synchronous; `require()` raises `AdminError` whose
-  message is the exact user-facing refusal text.
+  message is the exact user-facing refusal text. `Capability.RESET_SETTINGS` is in
+  `MAIN_ONLY_CAPABILITIES`, so a forged `reset:confirm` callback is refused
+  server-side.
 - `WhaleFilter.evaluate(event, config)` accepts an explicit `RuntimeConfig`, so
   threshold/coin/toggle tests need no database writes.
-- `permissions.requires()` injects a third `actor` argument into handlers.
+- `permissions.requires()` injects a third `actor` argument into handlers, and
+  `tests/conftest.py` resets its throttle state between tests.
 - Injection seams for offline tests: `HyperliquidREST._client` (set only when
   `None` in `start()`) and the module-level `app.hyperliquid.websocket.ws_connect`.
 - `validate_runtime()` reads `os.getenv("DATABASE_URL")` **directly** for the
   production check — a test must set the real env var, not just the field.
-- `Settings` field for the Telegram token is `bot_token` (env `BOT_TOKEN`).
+- `Settings` field for the Telegram token is `bot_token` (env `BOT_TOKEN`); the
+  production-environment flag is `app_env` (env `APP_ENV`, default `production`).
 - `tests/test_engine_pipeline.py` asserts timing through queue joins
   (`engine.trades_seen`, `engine._queue.join()`, `alerts._queue.join()`), never
   `asyncio.sleep`. Keep it that way; a sleep-based version is flaky.

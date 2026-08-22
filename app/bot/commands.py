@@ -62,6 +62,7 @@ CO_ADMIN_EXTRA: tuple[BotCommand, ...] = (
     BotCommand("startmonitor", "Start whale monitoring"),
     BotCommand("stopmonitor", "Stop whale monitoring"),
     BotCommand("settings", "Show every setting"),
+    BotCommand("config", "Show the stored configuration"),
     BotCommand("threshold", "Show the alert thresholds"),
     BotCommand("setthreshold", "Set the minimum whale value"),
     BotCommand("margin", "Show the margin gate"),
@@ -84,6 +85,7 @@ MAIN_ADMIN_EXTRA: tuple[BotCommand, ...] = (
     BotCommand("addadmin", "Add a co-admin"),
     BotCommand("removeadmin", "Remove a co-admin"),
     BotCommand("audit", "Recent configuration changes"),
+    BotCommand("resetsettings", "Reset all settings to defaults"),
 )
 
 CO_ADMIN_COMMAND_MENU: tuple[BotCommand, ...] = PUBLIC_COMMAND_MENU + CO_ADMIN_EXTRA

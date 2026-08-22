@@ -86,6 +86,36 @@ class AppContainer:
             },
         )
 
+    def startup_summary(self) -> dict[str, Any]:
+        """The safe startup snapshot (spec §26).
+
+        Counts and states only. No ``BOT_TOKEN``, no ``DATABASE_URL``, no
+        credential of any kind — the redaction filter would catch a leak, but the
+        right place not to log a secret is to not assemble one.
+
+        ``persistence`` is the field to read after a redeploy: ``durable`` means
+        Postgres, so the values below came back from storage; ``ephemeral`` means
+        SQLite in the container filesystem, which Railway discards on every
+        deploy. ``configuration`` says whether this start *loaded* settings or
+        *seeded* them, which is how an unexpected reset becomes visible.
+        """
+        config = self.settings.config
+        return {
+            "database": "postgresql" if not self.db.is_sqlite else "sqlite",
+            "persistence": "ephemeral" if self.db.is_sqlite else "durable",
+            "configuration": "seeded" if self.settings.first_boot else "loaded",
+            "initialised": self.settings.bootstrapped_at,
+            "monitoring": config.monitoring_enabled,
+            "paused": config.paused,
+            "mode": "public" if config.public_mode else "private",
+            "threshold_usd": config.min_whale_value,
+            "coins": config.coin_label,
+            "coin_count": len(config.coins),
+            "admins": self.admins.co_admin_count + 1,
+            "co_admins": self.admins.co_admin_count,
+            "watched_wallets": len(config.tracked_wallets),
+        }
+
     # ── ingestion ─────────────────────────────────────────────
     async def start_ingest(self) -> None:
         """Bring up Hyperliquid. Failure here degrades the bot, never kills it."""

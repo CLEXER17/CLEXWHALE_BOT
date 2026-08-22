@@ -51,6 +51,8 @@ COMMANDS = (
     ("setmargin", admin.cmd_setmargin),
     ("cooldown", admin.cmd_cooldown),
     ("settings", admin.cmd_settings),
+    ("config", admin.cmd_config),
+    ("resetsettings", admin.cmd_resetsettings),
     ("setcoins", admin.cmd_setcoins),
     ("addcoin", admin.cmd_addcoin),
     ("removecoin", admin.cmd_removecoin),

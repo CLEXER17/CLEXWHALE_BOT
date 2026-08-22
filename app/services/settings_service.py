@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Sequence
 
 from app.config import Settings
@@ -60,6 +61,15 @@ KEY_WALLETS = "enable_wallet_tracking"
 KEY_BOOK = "enable_book_scanner"
 KEY_WINDOW = "default_window"
 
+#: Written once, the first time the bot ever opens this database. Its presence is
+#: what turns "should defaults be applied?" into a recorded fact rather than a
+#: guess: the environment's coin list is seeded only while this marker is absent,
+#: so an admin who deliberately monitors nothing does not get DEFAULT_COINS
+#: resurrected by the next redeploy (spec §11/§12).
+KEY_BOOTSTRAPPED = "bootstrapped_at"
+
+#: Keys the toggle machinery may flip. Deliberately excludes KEY_BOOTSTRAPPED —
+#: it is a fact about the installation, not a preference.
 BOOL_KEYS = frozenset(
     {
         KEY_MONITORING,
@@ -202,11 +212,24 @@ class SettingsService:
         self._listeners: list[ChangeListener] = []
         self._lock = asyncio.Lock()
         self.loaded = False
+        #: When this installation's database was first initialised, and whether
+        #: that happened during *this* start. Reported by /config and the startup
+        #: summary so an unexpected re-seed is visible rather than silent.
+        self.bootstrapped_at: str | None = None
+        self.first_boot = False
+        #: What the most recent explicit coin replacement actually changed, so a
+        #: removal is always reported to the admin who caused it.
+        self._last_coin_diff: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
 
     # ── access ────────────────────────────────────────────────
     @property
     def config(self) -> RuntimeConfig:
         return self._config
+
+    @property
+    def last_coin_diff(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """``(added, removed)`` from the most recent :meth:`set_coins`."""
+        return self._last_coin_diff
 
     def on_change(self, listener: ChangeListener) -> None:
         self._listeners.append(listener)
@@ -231,6 +254,22 @@ class SettingsService:
             return json.loads(raw)
         except (ValueError, TypeError):
             return default
+
+    @staticmethod
+    def decode_stored(raw: str | None) -> Any:
+        """Decode one stored row for display. Public counterpart of :meth:`_decode`.
+
+        Used by ``/config``, which reports what the database actually holds — a
+        row that fails to decode is shown as its raw text rather than replaced by
+        a default, because silently substituting a default is exactly the failure
+        the command is there to expose.
+        """
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
 
     # ── bootstrap ─────────────────────────────────────────────
     async def load(self) -> RuntimeConfig:
@@ -261,6 +300,11 @@ class SettingsService:
 
         async with self.db.session() as session:
             stored = await SettingsRepository.all(session)
+            first_boot = KEY_BOOTSTRAPPED not in stored and not stored
+            # Only *missing* keys are written. An existing row is never touched,
+            # so a redeploy cannot overwrite a threshold or a mode an admin set
+            # through Telegram with whatever the environment happens to say
+            # (spec §11/§12 — defaults apply only where no configuration exists).
             missing = {k: v for k, v in defaults.items() if k not in stored}
             for key, value in missing.items():
                 await SettingsRepository.set(session, key, self._encode(value))
@@ -268,12 +312,22 @@ class SettingsService:
                 log.info("Seeded settings from environment", extra={"keys": sorted(missing)})
 
             coins = await CoinRepository.enabled(session)
-            if not coins and not stored:
-                # First boot: seed the coin list from DEFAULT_COINS.
+            if first_boot and not coins:
+                # First boot only, and recorded as such below: on every later
+                # start an empty coin list is an admin's decision, not a gap to
+                # be filled from DEFAULT_COINS.
                 seed = env.default_coin_list
                 await CoinRepository.replace(session, seed)
                 coins = list(seed)
                 log.info("Seeded tracked coins from environment", extra={"coins": coins})
+
+            if KEY_BOOTSTRAPPED not in stored:
+                stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                await SettingsRepository.set(session, KEY_BOOTSTRAPPED, self._encode(stamp))
+                self.bootstrapped_at = stamp
+            else:
+                self.bootstrapped_at = self._decode(stored[KEY_BOOTSTRAPPED], None)
+            self.first_boot = first_boot
 
             merged = {**defaults, **{k: self._decode(v, defaults.get(k)) for k, v in stored.items()}}
             wallets = [row.address for row in await WalletRepository.tracked(session)]
@@ -427,16 +481,47 @@ class SettingsService:
         await self._notify()
 
     async def set_coins(self, coins: Sequence[str], admin_id: int | None = None) -> tuple[str, ...]:
+        """Make the coin list *exactly* ``coins``. An explicit replace.
+
+        This is the only coin operation that removes anything the caller did not
+        name, so it is reserved for commands that literally mean "set the list"
+        (``/setcoins``) and for the confirmed clear. Everything else — the panel
+        buttons, ``/addcoin``, the add prompt — goes through :meth:`add_coin` and
+        :meth:`remove_coin` so an addition can never delete a coin an admin chose
+        earlier, and two admins editing at once cannot overwrite each other.
+        """
         cleaned = [c.strip().upper() for c in coins if c.strip()]
         async with self.db.session() as session:
             old = await CoinRepository.enabled(session)
-            await CoinRepository.replace(session, cleaned, admin_id)
-            if admin_id is not None:
+            added, removed = await CoinRepository.replace(session, cleaned, admin_id)
+            if admin_id is not None and (added or removed):
                 await AuditRepository.record(
                     session, admin_id, "set:coins", "tracked_coins", ",".join(old), ",".join(cleaned)
                 )
         await self._refresh_coins()
+        self._last_coin_diff = (tuple(added), tuple(removed))
         return self._config.coins
+
+    async def add_coins(
+        self, coins: Sequence[str], admin_id: int | None = None
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Additive bulk operation: returns ``(added, already_present)``.
+
+        Nothing is ever removed here. An admin who sends ``HYPE`` to the add
+        prompt while monitoring BTC/ETH/SOL ends up monitoring four coins, not
+        one — which is the whole point of separating this from :meth:`set_coins`.
+        """
+        added: list[str] = []
+        present: list[str] = []
+        for coin in coins:
+            symbol = coin.strip().upper()
+            if not symbol:
+                continue
+            if await self.add_coin(symbol, admin_id):
+                added.append(symbol)
+            else:
+                present.append(symbol)
+        return tuple(added), tuple(present)
 
     async def add_coin(self, coin: str, admin_id: int | None = None) -> bool:
         coin = coin.strip().upper()
@@ -486,3 +571,58 @@ class SettingsService:
             self._config = replace(self._config, tracked_wallets=tuple(wallets))
         await self._notify()
         return removed
+
+    # ── explicit reset ────────────────────────────────────────
+    async def reset_to_defaults(self, admin_id: int | None = None) -> RuntimeConfig:
+        """Restore every setting to its environment default. **Destructive.**
+
+        The only path in the service that rewrites configuration wholesale, and
+        it exists so that no *ordinary* command ever needs to (spec §23): callers
+        must have taken an explicit confirmation from the admin first. Coins are
+        reset to ``DEFAULT_COINS`` as well, because "reset settings" that left a
+        hand-edited coin list behind would not be a reset.
+
+        Deliberately *not* reset: admins and co-admins, users, tracked wallets,
+        recorded events and alert history. Those are records, not preferences —
+        §22 says only a command that means REMOVE/DELETE may remove them, and
+        this command means "settings".
+        """
+        env = self.env
+        values: dict[str, Any] = {
+            KEY_MONITORING: True,
+            KEY_PAUSED: False,
+            KEY_PUBLIC_MODE: env.public_mode,
+            KEY_MIN_WHALE: float(env.min_whale_value),
+            KEY_MIN_TRADE: env.min_trade_value,
+            KEY_MIN_POSITION: env.min_position_value,
+            KEY_MIN_POSITION_DELTA: env.min_position_delta_value,
+            KEY_MIN_ORDER: env.min_order_value,
+            KEY_MIN_MARGIN: float(env.min_margin_value or 0.0),
+            KEY_COOLDOWN: int(env.alert_cooldown_seconds),
+            KEY_ALL_COINS: bool(env.monitor_all_coins),
+            KEY_MAX_COINS: int(env.max_monitored_coins),
+            KEY_TRADES: env.enable_trade_detector,
+            KEY_POSITIONS: env.enable_position_detector,
+            KEY_ORDERS: env.enable_order_detector,
+            KEY_ORDER_ALERTS: env.enable_order_alerts,
+            KEY_CANCELS: env.enable_order_cancel_alerts,
+            KEY_WALLETS: env.enable_wallet_tracking,
+            KEY_BOOK: env.enable_book_scanner,
+            KEY_WINDOW: DEFAULT_WINDOW,
+        }
+        seed = list(env.default_coin_list)
+        async with self.db.session() as session:
+            for key, value in values.items():
+                await SettingsRepository.set(session, key, self._encode(value), admin_id)
+            await CoinRepository.replace(session, seed, admin_id)
+            if admin_id is not None:
+                await AuditRepository.record(
+                    session, admin_id, "reset:settings", "settings", "confirmed", "defaults"
+                )
+            coins = await CoinRepository.enabled(session)
+            wallets = [row.address for row in await WalletRepository.tracked(session)]
+        async with self._lock:
+            self._config = self._build(values, coins, wallets)
+        log.warning("Settings reset to defaults", extra={"admin": admin_id})
+        await self._notify()
+        return self._config

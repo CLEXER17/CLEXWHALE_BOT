@@ -89,17 +89,60 @@ counter rather than applying back-pressure to the socket.
 - Callback data is `area:action:arg`. `on_callback` maps the area to a
   capability and re-authorises **on every press** — crafted callback data from a
   non-admin is refused with an alert, never executed.
+- A button is a command. Both go through the same service method, so pressing
+  `➕ Add coins` adds and nothing more; a panel never submits its visible values
+  as a bundle, because that would turn one intended change into a full replacement.
+- Destructive controls are two-step: 🧹 Clear (coins) and `/resetsettings` render a
+  confirmation first and only act on the explicit second press
+  (`coin:clearyes`, `reset:confirm`). `/resetsettings` also needs
+  `Capability.RESET_SETTINGS`, which is main-admin only.
 - Multi-step input uses `context.user_data["pending"]`; the capability is
   re-checked when the answer arrives, not only when the prompt was issued.
+
+## Configuration persistence
+
+**PostgreSQL is the source of truth; the in-memory snapshot is a cache of it.**
+The direction is fixed and must not be reversed:
+
+```
+boot            PostgreSQL SELECT ──► build RuntimeConfig ──► runtime reads cache
+change          command / button ──► PostgreSQL UPDATE (one row) ──► refresh cache
+```
+
+`SettingsService` holds a **frozen** `RuntimeConfig` and swaps a whole new
+instance under an `asyncio.Lock`, so a reader never sees a half-applied change.
+Every setter (`set_threshold`, `set_public_mode`, `add_coin`, `remove_coin`,
+`set_trade_alerts`, …) writes its own row and patches its own field — a change is
+a **patch**, never a reconstruction from defaults. `set_coins()` is the only
+non-`remove` operation permitted to delete, and it is reachable only from
+`/setcoins` and the confirmed 🧹 Clear.
+
+Defaults apply only where nothing is stored. `load()` writes a settings row solely
+when that key is absent, and seeds `DEFAULT_COINS` only while the
+`bootstrapped_at` marker is missing. `first_boot` / `bootstrapped_at` therefore
+answer "should defaults apply?" from a stored fact, and
+`startup_summary()["configuration"]` exposes the answer as `seeded` vs `loaded` —
+which is how an unexpected reset becomes visible in the Railway log rather than
+being discovered later by a missing alert.
+
+`/config` (`views.config_view`) reads `settings`, `tracked_coins`, `admins`,
+`tracked_wallets` and `users` **directly**, never through the cache, and flags any
+field where the two disagree. A panel that read the cache would only confirm
+itself.
+
+The startup summary and the plain-text block in `main.py` carry counts and states
+only — no `BOT_TOKEN`, no `DATABASE_URL`, no credential. The redaction filter would
+catch a leak; the right place not to log a secret is to not assemble one.
 
 ## Database structure
 
 PostgreSQL on Railway via `DATABASE_URL` (asyncpg). SQLite+aiosqlite is allowed
-for local runs and tests only — `validate_runtime` makes it fatal in production.
-Tables: `admins`, `users`, `settings`, `tracked_coins`, `tracked_wallets`,
-`wallets`, `whale_events`, `orders`, `positions`, `alert_history`,
-`admin_audit`, `bot_logs`. All timestamps are timezone-aware UTC. See
-`DATA_MODEL.md`.
+for local runs and tests only — `validate_runtime` makes it fatal in production,
+because the container filesystem is discarded on every deploy and settings stored
+there would silently vanish. Tables: `admins`, `users`, `settings`,
+`tracked_coins`, `tracked_wallets`, `wallets`, `whale_events`, `orders`,
+`positions`, `alert_history`, `admin_audit`, `bot_logs`. All timestamps are
+timezone-aware UTC. See `DATA_MODEL.md`.
 
 ## Event processing
 
@@ -126,9 +169,15 @@ position is never compared against a $4.8M cash flow threshold.
 
 Three roles: `MAIN_ADMIN` (from `MAIN_ADMIN_ID`, unremovable), `CO_ADMIN`
 (unlimited count, added by the main admin only), `USER`. Capabilities are a
-frozenset per role; `MANAGE_ADMINS` and `VIEW_AUDIT` are main-admin only. Users
-get `VIEW_PUBLIC`/`VIEW_WHALES` only while `PUBLIC_MODE` is on. Every mutation
-writes an `admin_audit` row (admin id, action, target, old, new, timestamp).
+frozenset per role; `MANAGE_ADMINS`, `VIEW_AUDIT` and `RESET_SETTINGS` are
+main-admin only — a co-admin may change any individual setting, but one command
+that discards all of them at once is a different kind of act. Users get
+`VIEW_PUBLIC`/`VIEW_WHALES` only while `PUBLIC_MODE` is on. Every mutation writes
+an `admin_audit` row (admin id, action, target, old, new, timestamp).
+
+Roles are stored, not derived: `AdminRepository.ensure_main` only inserts or
+promotes the configured main admin and never deletes or demotes a co-admin, so a
+redeploy cannot turn a co-admin into a normal user.
 
 ## Alert flow
 

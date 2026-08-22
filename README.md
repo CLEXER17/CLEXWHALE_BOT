@@ -20,17 +20,18 @@ trust a field.
 1. [Features](#features)
 2. [How it works](#how-it-works)
 3. [Telegram commands](#telegram-commands)
-4. [Roles and permissions](#roles-and-permissions)
-5. [Local installation](#local-installation)
-6. [Environment variables](#environment-variables)
-7. [Creating the bot with BotFather](#creating-the-bot-with-botfather)
-8. [Pushing to GitHub](#pushing-to-github)
-9. [Deploying to Railway](#deploying-to-railway)
-10. [Health checks](#health-checks)
-11. [Hyperliquid: what is and is not available](#hyperliquid-what-is-and-is-not-available)
-12. [Tests](#tests)
-13. [Project layout](#project-layout)
-14. [Security](#security)
+4. [Persistence and settings safety](#persistence-and-settings-safety)
+5. [Roles and permissions](#roles-and-permissions)
+6. [Local installation](#local-installation)
+7. [Environment variables](#environment-variables)
+8. [Creating the bot with BotFather](#creating-the-bot-with-botfather)
+9. [Pushing to GitHub](#pushing-to-github)
+10. [Deploying to Railway](#deploying-to-railway)
+11. [Health checks](#health-checks)
+12. [Hyperliquid: what is and is not available](#hyperliquid-what-is-and-is-not-available)
+13. [Tests](#tests)
+14. [Project layout](#project-layout)
+15. [Security](#security)
 
 ---
 
@@ -146,8 +147,9 @@ command below is admin-only.
 | `/setthreshold <usd>` | admin | Set the minimum whale value |
 | `/cooldown <seconds>` | admin | Set the per-alert cooldown |
 | `/settings` | admin | Show all effective settings |
-| `/setcoins <A,B,C>` | admin | Replace the coin filter |
-| `/addcoin <COIN>` | admin | Add a coin |
+| `/config` | admin | Show the configuration **as stored in the database** |
+| `/setcoins <A,B,C>` | admin | Replace the coin filter (the only command that removes) |
+| `/addcoin <COIN>` | admin | Add a coin, keeping the existing ones |
 | `/removecoin <COIN>` | admin | Remove a coin |
 | `/allcoins <on\|off>` | admin | Monitor every perp, or only the filter |
 | `/watch <0x…>` | admin | Add a wallet to the focus slate |
@@ -156,6 +158,7 @@ command below is admin-only.
 | `/admins` | admin | List admins |
 | `/addadmin <telegram_id>` | **main admin only** | Add a co-admin |
 | `/removeadmin <telegram_id>` | **main admin only** | Remove a co-admin |
+| `/resetsettings` | **main admin only** | Reset every setting to its default (asks first) |
 | `/audit` | **main admin only** | Recent admin audit log |
 
 In private mode, an unauthorised user receives exactly:
@@ -168,6 +171,75 @@ Whale monitoring is available only to authorized administrators.
 Most commands that take an argument also work without one: they open the matching
 panel view or an inline prompt instead of returning a usage error. Unknown
 commands and malformed arguments get a specific message, never a silent failure.
+
+Every command is a **patch**: it changes the one thing it names and leaves the
+rest of the configuration alone. See
+[Persistence and settings safety](#persistence-and-settings-safety).
+
+---
+
+## Persistence and settings safety
+
+Two rules govern every setting in this bot.
+
+**1. A change is a patch, never a replacement.** `/addcoin HYPE` on `BTC ETH SOL`
+gives you `BTC ETH HYPE SOL` — it does not give you `HYPE`. `/setthreshold 5m`
+changes the threshold and nothing else: not the coins, not public mode, not the
+alert toggles. The inline buttons behave exactly like the commands, because they
+call the same service methods; a panel never submits its visible values as a
+bundle.
+
+Only four things remove anything, and each says so in its name and in its reply:
+
+| Operation | Removes | Confirmation |
+|---|---|---|
+| `/removecoin <COIN>` | that one coin | — |
+| `/setcoins <A,B,C>` | coins not in the list | reply names every removal |
+| 🧹 Clear (coin panel) | all coins | second tap required |
+| `/resetsettings` | every setting → defaults | second tap required, main admin only |
+
+`/resetsettings` resets **settings**. It keeps admins and co-admins, users,
+watched wallets, recorded whale events and alert history — those are records, not
+preferences.
+
+**2. PostgreSQL is the source of truth; the cache follows it.** Nothing
+user-controlled lives only in process memory. Every change is written to the
+database first, then the in-memory snapshot is refreshed from that write:
+
+```
+command / button  ->  PostgreSQL UPDATE  ->  refresh cache  ->  runtime reads cache
+boot              ->  PostgreSQL SELECT  ->  build cache
+```
+
+What survives a restart **and** a Railway redeploy: the coin filter, all four
+thresholds, the margin gate, the cooldown, public/private mode, the monitoring
+switch, the global pause, every alert toggle, the main admin and every co-admin
+*with their role*, watched wallets, registered users and their subscription
+state, detected whale events, order and position records, alert history and the
+deduplication state.
+
+Defaults are applied **only where nothing is stored**. On first boot the bot
+records a `bootstrapped_at` marker; from then on, a start reads the stored rows
+and seeds only keys that are genuinely absent. It never overwrites a stored value
+with an environment default — so an admin who deliberately monitors no coins does
+not find `DEFAULT_COINS` resurrected by the next deploy. `.env` seeds the *first*
+boot; after that the database wins.
+
+`/config` prints what the database actually holds, read row by row rather than
+from the cache, and flags any field where the two disagree. The startup log
+prints the same summary in plain lines — storage backend, whether the
+configuration was `LOADED` or `SEEDED`, coins, threshold, mode, admin counts,
+watched wallets — with no token, URL or credential in it.
+
+**`DATABASE_URL` is what makes all of this durable.** On Railway, attach a
+PostgreSQL service and reference it as `${{Postgres.DATABASE_URL}}`; see
+[Deploying to Railway](#deploying-to-railway). Locally, leaving it empty falls
+back to a SQLite file, which is fine for development. In production it is not:
+the container filesystem is discarded on every deploy, so a production boot
+(`APP_ENV` defaults to `production`) with a missing or SQLite `DATABASE_URL`
+**fails with a configuration error** rather than starting on storage that
+silently loses everything. If a deployment ever does run on SQLite, the startup
+log reports `ephemeral` and warns explicitly.
 
 ---
 
@@ -276,8 +348,13 @@ or malformed; it does **not** fall back to a default or a fake credential.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | *(empty)* | Injected by Railway when you attach PostgreSQL. Empty locally ⇒ SQLite file. No host, user, password, port or database name is hardcoded anywhere. |
+| `DATABASE_URL` | *(empty)* | Injected by Railway when you attach PostgreSQL. Empty locally ⇒ SQLite file. **Required in production**: a production boot with this missing, or pointing at SQLite, fails with a configuration error instead of starting on storage that is wiped by the next deploy. No host, user, password, port or database name is hardcoded anywhere. |
 | `RUN_MIGRATIONS` | `true` | Run Alembic migrations automatically on boot. |
+
+Mutable runtime settings — the coin filter, thresholds, mode, toggles, admins,
+watched wallets — are **not** read from `.env` after the first boot. They live in
+the database, which is the only place a `/setthreshold` or `/addcoin` survives a
+redeploy. See [Persistence and settings safety](#persistence-and-settings-safety).
 
 **Access**
 
@@ -446,6 +523,13 @@ for the same 10 user-subscription slots and the same REST weight budget.
 8. **Verify in Telegram.** DM the bot `/start`, then `/status`. `/status` should
    report the connection state and the active coin filter. `/startmonitor` begins
    alerting.
+9. **Verify persistence.** Send `/config` — it should report
+   `Storage: PostgreSQL` and `These values survive a restart and a redeploy`. The
+   startup log should show `Database ......... CONNECTED (postgresql, durable)`.
+   If it says `sqlite` or `ephemeral`, `DATABASE_URL` is not attached and every
+   setting will be lost on the next deploy. To confirm end to end: `/addcoin HYPE`,
+   `/setthreshold 5000000`, redeploy, then `/config` again — the coin list must
+   still contain HYPE and the threshold must still be 5,000,000.
 
 The application has no dependency on Windows paths, local files for persistent
 state, `localhost` services, a local database, or any file outside this

@@ -27,6 +27,9 @@ CB_PUBLIC = "pub"
 CB_SET = "set"
 CB_STATS = "stats"
 CB_DATA = "data"
+#: The two-step reset. Its own namespace so that no ordinary settings callback can
+#: ever reach it, however the callback data is crafted (spec §23).
+CB_RESET = "reset"
 CB_NOOP = "noop"
 
 #: Common coins offered as quick-add buttons. These are only UI suggestions —
@@ -212,12 +215,31 @@ def coin_panel(config: RuntimeConfig, available: Sequence[str] = ()) -> InlineKe
         )
     rows.append(
         [
-            InlineKeyboardButton("✏️ Set list", callback_data=_cb(CB_COIN, "prompt")),
+            InlineKeyboardButton("➕ Add coins", callback_data=_cb(CB_COIN, "prompt")),
             InlineKeyboardButton("🧹 Clear", callback_data=_cb(CB_COIN, "clear")),
         ]
     )
     rows.append([back_button()])
     return InlineKeyboardMarkup(rows)
+
+
+def confirm_clear_coins() -> InlineKeyboardMarkup:
+    """Second step of the destructive clear.
+
+    The panel button is labelled 🧹 Clear and sits next to ➕ Add coins, so a
+    mistap is easy and would wipe every monitored coin. Nothing is deleted until
+    this explicit confirmation (spec §22/§23).
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🗑 Yes, clear all coins", callback_data=_cb(CB_COIN, "clearyes")
+                )
+            ],
+            [InlineKeyboardButton("✖️ Keep my coins", callback_data=_cb(CB_COIN, "show"))],
+        ]
+    )
 
 
 # ── admin management (spec §15) ────────────────────────────────
@@ -291,7 +313,8 @@ def settings_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
                     callback_data=_cb(CB_MARGIN, "open"),
                 )
             ],
-            [InlineKeyboardButton("🪙 Monitored Coins", callback_data=_cb(CB_COIN, "open"))],            [
+            [InlineKeyboardButton("🪙 Monitored Coins", callback_data=_cb(CB_COIN, "open"))],
+            [
                 InlineKeyboardButton(
                     f"📡 Monitoring: {bool_badge(config.monitoring_enabled)}",
                     callback_data=_cb(CB_MON, "status"),
@@ -312,7 +335,22 @@ def settings_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("👥 Admins", callback_data=_cb(CB_ADMIN, "open"))],
             [InlineKeyboardButton("📊 Statistics", callback_data=_cb(CB_STATS, "open"))],
+            [InlineKeyboardButton("🗄 Stored Configuration", callback_data=_cb(CB_SET, "config"))],
             [back_button()],
+        ]
+    )
+
+
+def confirm_reset_settings() -> InlineKeyboardMarkup:
+    """Second step of /resetsettings. The destructive button is never the default."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✖️ Keep my settings", callback_data=_cb(CB_SET, "open"))],
+            [
+                InlineKeyboardButton(
+                    "♻️ Yes, reset everything", callback_data=_cb(CB_RESET, "confirm")
+                )
+            ],
         ]
     )
 

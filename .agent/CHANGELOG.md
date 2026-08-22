@@ -4,6 +4,90 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-22 — Persistence and settings safety
+
+Two symptoms reported from production: *"when I change one setting, the bot
+unnecessarily replaces other existing settings"* and *"data/settings are lost after
+Railway redeploys."* Both were investigated in the existing code rather than
+answered with a rewrite, and the honest finding is that most of the settings layer
+was already correct — `set_value` writes one row and patches one field, `/addcoin`
+and `/removecoin` were already single-row, and `load()` already seeded only absent
+keys. What follows is the one real bug, plus the hardening that makes the second
+symptom impossible to reintroduce quietly.
+
+**The bug (symptom 1).** The coin panel's `✏️ Set list` button opened a prompt
+whose handler called `settings.set_coins()`. An admin monitoring BTC/ETH/SOL who
+answered `HYPE` was left monitoring **only** HYPE — a whole-list replacement
+wearing the label of an addition. Fixed in `app/bot/handlers/prompts.py` by
+calling the new `add_coins()`; the button now reads `➕ Add coins` and the prompt
+text says "add". Removal keeps its own explicit paths, none of which can be
+reached by typing a coin name.
+
+**The hardening (symptom 2).**
+
+- **`bootstrapped_at`** (`app/services/settings_service.py`). A marker row written
+  the first time the bot ever opens a database. Its presence turns "should
+  defaults be applied?" from an inference about an empty table into a recorded
+  fact, so an admin who deliberately monitors nothing does not find
+  `DEFAULT_COINS` resurrected by the next redeploy. Deliberately excluded from
+  `BOOL_KEYS`: it is a fact about the installation, not a preference.
+- **`CoinRepository.replace` is now a diff** returning `(added, removed)` instead
+  of `DELETE FROM tracked_coins` followed by re-inserts. Adding HYPE no longer
+  rewrites the BTC row, `added_by` and `created_at` survive for coins that were
+  not changing, and two admins editing at once can no longer resurrect rows the
+  other just removed.
+- **`add_coins()`** returns `(added, already_present)` so a repeated `/addcoin
+  HYPE` is an explicit no-op with a clear answer rather than a silent success that
+  leaves the admin wondering whether a duplicate was created.
+- **`decode_stored()`** returns the raw text when JSON decoding fails, so a
+  corrupt row is visible in `/config` instead of hidden behind a default.
+
+**New safety surfaces.**
+
+- **`/config`** (`views.config_view` → `texts.config_snapshot`). Reads `settings`,
+  `tracked_coins`, `admins`, `tracked_wallets` and `users` directly and compares
+  each field against the running cache, so drift is reported rather than
+  self-confirmed. Prints the storage *kind* only — never a connection string.
+- **`/resetsettings`** — two-step, and gated by a new
+  `Capability.RESET_SETTINGS` in `MAIN_ONLY_CAPABILITIES`. A co-admin may change
+  any individual setting, but one command that discards all of them at once is a
+  different kind of act; a forged `reset:confirm` callback hits the same refusal.
+  The reset restores setting rows and coins only: admins, users, watched wallets,
+  whale events and alert history are records, not preferences, and are kept.
+- **Two-step 🧹 Clear** for the coin list (`coin:clear` → `coin:clearyes`), and
+  `/setcoins` now names every coin it removed.
+- **`container.startup_summary()`** plus a plain-text block in `app/main.py`:
+  storage backend, `durable` vs `ephemeral`, `LOADED` vs `SEEDED`, coins,
+  threshold, mode, admin counts, watched wallets. Counts and states only — the
+  redaction filter would catch a leak, but the right place not to log a secret is
+  to not assemble one. A SQLite deployment gets an explicit warning that settings
+  will not survive a redeploy.
+
+**No migration was needed.** No new table and no new column: `bootstrapped_at` is
+a row in the existing key/value `settings` table, and every item the spec asked to
+persist already had a write site. `0001_initial` and `0002_alert_thread_key` remain
+the whole history.
+
+**Deliberately not done:** a UNIQUE constraint on `whale_events.dedup_key`. Trade
+identity already includes the exchange `tid`, and duplicates from a reconnect are
+caught by `seen_recently` within the 1-hour `IDENTITY_TTL`. A hard UNIQUE would
+permanently block a legitimate repeat of an identical position change — losing real
+events to avoid duplicate ones.
+
+**Tests:** `tests/test_persistence.py` (new, 29 tests) — patch semantics, the §33
+acceptance sequence, restart and redeploy survival for coins/threshold/mode/pause/
+toggles/co-admin role/wallets, defaults-only-where-absent, every removal path's
+confirmation, the co-admin refusal, `/config` drift detection, and the startup
+summary's silence about credentials. Mutation-checked: reverting the prompt to
+`set_coins()` reproduces the reported `('HYPE',)`. Suite: **555 passed, 0 failed**
+(was 526).
+
+`README.md` gained a "Persistence and settings safety" section documenting
+`DATABASE_URL`, what survives a redeploy, the four operations that remove
+anything, and the production fail-fast.
+
+---
+
 ## 2026-08-22 — The admin/wallet/data-integrity audit, and a global pause
 
 The 17 reported defects in the "ADMIN UI + WALLET DISPLAY + DATA INTEGRITY"

@@ -141,10 +141,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await respond(update, texts.invalid_coin(raw), edit=False)
             return
         unknown = admin_cmds.unknown_coins(container, coins)
-        await container.settings.set_coins(coins, actor.telegram_id)
+        # ADD, never replace. This prompt used to call set_coins(), which meant an
+        # admin monitoring BTC/ETH/SOL who sent "HYPE" was left monitoring only
+        # HYPE — the whole existing list silently destroyed by what reads as an
+        # addition (spec §3/§22/§34). Removing a coin has its own explicit paths:
+        # the per-coin toggle button, /removecoin, and /setcoins.
+        added, present = await container.settings.add_coins(coins, actor.telegram_id)
         if container.settings.config.all_coins:
             await container.settings.set_value("all_coins", False, actor.telegram_id)
-        await respond(update, texts.coins_updated(container.settings.config), edit=False)
+        await respond(
+            update,
+            texts.coins_added(container.settings.config, added, present),
+            edit=False,
+        )
         for coin in unknown:
             await respond(update, texts.unknown_coin(coin), edit=False)
         return

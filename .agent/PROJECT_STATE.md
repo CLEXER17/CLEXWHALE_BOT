@@ -1,6 +1,6 @@
 # PROJECT STATE
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 Read this file first. The repository is the source of truth; this file records
 *why* the code looks the way it does and *what happens next*.
@@ -9,21 +9,25 @@ Read this file first. The repository is the source of truth; this file records
 
 ## CURRENT PHASE
 
-**PHASE 15 — DEPLOYMENT** (spec §54/§55)
+**POST-DEPLOYMENT HARDENING**
 
-Phases 1–14 are implemented and verified, including the full §36 test suite
-(**392 passed, 0 failed, 0 skipped**) and all documentation. The repository is
-published at **<https://github.com/CLEXER17/CLEXWHALE_BOT>** and `main` tracks
-`origin/main`. **The bot has been deployed on Railway and has run**: PostgreSQL
-migrations applied, `/health` up, Hyperliquid websocket connected, whale events
-detected.
+Phases 1–15 are implemented and verified. The repository is published at
+**<https://github.com/CLEXER17/CLEXWHALE_BOT>** and `main` tracks `origin/main`.
+**The bot has been deployed on Railway and has run**: PostgreSQL migrations
+applied, `/health` up, Hyperliquid websocket connected, whale events detected.
 
-That first run exposed two defects no offline test could reach — every alert was
-dropped because the Telegram bot was never attached to the alert service, and
-the secret redactor corrupted `%`-style log arguments into traceback storms. Both
-are fixed, regression-tested, and pushed (`aa910bc`, `c965da9`). **Alert delivery
-has not yet been confirmed live**; that needs the redeploy plus a whale above the
-threshold.
+Work since then has been driven by defects reported from the live deployment
+rather than by the original spec phases. Latest completed: the **persistence +
+settings-safety fix** (34-section spec), which addressed two reported production
+symptoms — a settings change replacing unrelated settings, and configuration
+disappearing after a redeploy. Suite: **555 passed, 0 failed**.
+
+One task is paused mid-flight: the **verified execution + position lifecycle**
+work (39-section spec). Engine, detector and filter are done and committed;
+`alert_service` relabelling and its tests remain. See `NOW.md` and `HANDOFF.md`.
+
+**Alert delivery has still not been confirmed live**; that needs a redeploy plus a
+whale above the threshold, and the token rotation below.
 
 No credential exists in this repository and none may be added to it.
 
@@ -62,10 +66,18 @@ No credential exists in this repository and none may be added to it.
   service was never given a bot (PTB does not run `post_init` under a manual
   lifecycle), and secret redaction broke `%d` log placeholders. Both fixed with
   regression tests proven to fail against the shipped code
+- **Persistence + settings safety (34-section spec).** Every command is a patch;
+  `bootstrapped_at` makes "should defaults apply?" a stored fact; diff-based
+  `CoinRepository.replace`; `/config` reads the tables directly and flags drift;
+  two-step 🧹 Clear and main-admin-only `/resetsettings`; `startup_summary()` plus
+  the plain-text startup block. 29 new tests in `tests/test_persistence.py`
 
 ## CURRENTLY WORKING ON
 
-- Nothing. Waiting on the redeploy to confirm alerts actually reach Telegram.
+- Resuming the paused **verified execution + position lifecycle** task:
+  `alert_service._render_trade` to the §4 format, `/recent` + `/whales` filtered
+  to executions, split summary metrics, diagnostics counters, the
+  `enable_order_alerts` toggle UI, then the 26 §31 regression tests.
 
 ## NEXT TASK
 
@@ -73,25 +85,54 @@ No credential exists in this repository and none may be added to it.
    treated as compromised: @BotFather → `/revoke` → put the new token in the
    Railway variable.
 2. Confirm the redeploy: the log must contain `Telegram connected` and must not
-   contain `Alert dropped: Telegram bot not attached yet`.
-3. If alerts still do not arrive, look at recipients rather than wiring —
+   contain `Alert dropped: Telegram bot not attached yet`. The new startup block
+   must read `CONNECTED (postgresql, durable)` and `Configuration .... LOADED`.
+3. Confirm persistence live: `/addcoin HYPE`, `/setthreshold 5000000`, redeploy,
+   then `/config` — HYPE still present, threshold still 5,000,000.
+4. If alerts still do not arrive, look at recipients rather than wiring —
    `AlertService._resolve_recipients` sends to `admins.admin_ids`, so
    `MAIN_ADMIN_ID` must match the watching account.
-4. After a clean live run, record any payload shape that differs from
+5. After a clean live run, record any payload shape that differs from
    `API_NOTES.md` — and correct the file rather than the observation.
 
 ---
 
-## FILES MODIFIED (this phase)
+## FILES MODIFIED (recent work)
+
+Persistence + settings safety:
+
+- `app/services/settings_service.py` — `KEY_BOOTSTRAPPED`, `first_boot`,
+  `last_coin_diff`, `add_coins()`, `reset_to_defaults()`, `decode_stored()`;
+  `load()` seeds only absent keys, coins only while unbootstrapped
+- `app/database/repository.py` — `CoinRepository.replace` is a diff returning
+  `(added, removed)`
+- `app/bot/handlers/prompts.py` — the coins prompt **adds** instead of replacing
+  (the reported bug)
+- `app/bot/handlers/admin.py` — `cmd_config`, `cmd_resetsettings`; addcoin/setcoins
+  report added vs removed
+- `app/bot/handlers/callbacks.py` — `CB_RESET` area, two-step coin clear,
+  `set:config`
+- `app/bot/keyboards/inline.py` — `➕ Add coins`, `confirm_clear_coins`,
+  `confirm_reset_settings`, `🗄 Stored Configuration`
+- `app/bot/views.py` — `config_view()` reads the tables directly
+- `app/bot/messages/texts.py` — `coins_added`/`coins_replaced`/`coins_cleared`,
+  the two confirmations, `settings_reset`, `config_snapshot`
+- `app/services/admin_service.py` — `Capability.RESET_SETTINGS` (main admin only)
+- `app/container.py` — `startup_summary()`
+- `app/main.py` — plain-text startup block + SQLite-is-ephemeral warning
+- `app/bot/handlers/__init__.py`, `app/bot/commands.py` — `/config`,
+  `/resetsettings`
+- `tests/test_persistence.py` (new, 29 tests)
+- `README.md` — "Persistence and settings safety"
+
+Earlier this phase:
 
 - `app/whale/engine.py` — added `_write_lock` around the persistence write
 - `app/bot/application.py` — attach the bot at build time; `post_init` made
   public, guarded and explicitly invoked
 - `app/main.py` — `Runtime.start()` calls `post_init` after `initialize()`
 - `app/utils/logging.py` — type-preserving `_scrub_arg`, `_safe_message`
-- `tests/*` (new — complete, 392 tests, including `test_bot_application.py`)
-- `README.md` (new)
-- `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`, `.agent/NOW.md`,
+- `README.md`, `.agent/API_NOTES.md`, `.agent/TEST_STATUS.md`, `.agent/NOW.md`,
   `.agent/HANDOFF.md`, `.agent/FILE_INDEX.md` (new)
 - `.agent/PROJECT_STATE.md`, `.agent/TASK_QUEUE.md`, `.agent/DECISIONS.md`,
   `.agent/CHANGELOG.md`, `.agent/ARCHITECTURE.md`, `.agent/DATA_MODEL.md` (updated)
@@ -136,24 +177,35 @@ rather than worked around with invented data.
 - Monitoring windows (2M…4H) are **observation windows over events**, never
   presented as candles.
 - Critical state lives in PostgreSQL, never only in RAM: admins, public mode,
-  monitoring switch, threshold, coins, cooldown, tracked wallets, history.
-- `AppContainer.restore()` reloads all of that after a redeploy.
+  monitoring switch, global pause, thresholds, coins, cooldown, tracked wallets,
+  alert toggles, users, events, orders, positions, alert history.
+- `AppContainer.restore()` reloads all of that after a redeploy, and
+  `startup_summary()` prints whether the configuration was `loaded` or `seeded` so
+  an unexpected reset is visible rather than silent.
+- Settings changes are **patches**: one row written, one field refreshed. Nothing
+  reconstructs the configuration from defaults except `reset_to_defaults()`, which
+  is reachable only from a confirmed `/resetsettings`.
 
 ## TEST STATUS
 
 Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
 
-- **TOTAL 392 · PASSED 392 · FAILED 0 · SKIPPED 0** (33.45 s)
+- **TOTAL 555 · PASSED 555 · FAILED 0 · SKIPPED 0** (33.60 s)
 - Run with `./.venv/Scripts/python.exe -m pytest -q`. The bare `python` on PATH
   is not the project interpreter and lacks `pytest_asyncio`.
 - Unit tests: all 16 items of the spec §36 list are covered; the mapping from
   requirement to test name is in `TEST_STATUS.md`.
 - Integration tests: `test_engine_pipeline.py` drives a raw `trades` frame all
   the way to the final Telegram message text; also `test_database.py`,
-  `test_resilience.py`, `test_telegram_handlers.py`.
+  `test_resilience.py`, `test_telegram_handlers.py`, `test_persistence.py`.
+- Persistence: `test_persistence.py` simulates a restart
+  (`SettingsService(...).load()`) and a redeploy (`AppContainer(...).restore()`)
+  over the same database, and mutation-checks the reported bug — reverting the
+  prompt to `set_coins()` makes it fail with `('HYPE',)`.
 - Alembic migration: verified manually (`upgrade head` → `downgrade base` →
   `upgrade head`). The suite runs on SQLite and does not execute the migration
-  scripts.
+  scripts. No new migration was needed for the persistence work: no new table or
+  column was introduced.
 - Railway deployment: **performed, and the process ran.** Migrations applied to
   PostgreSQL, `/health` served, Hyperliquid connected, whales detected. Alert
-  *delivery* is still unconfirmed pending the redeploy that carries `aa910bc`.
+  *delivery* is still unconfirmed pending a redeploy.

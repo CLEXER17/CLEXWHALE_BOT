@@ -96,11 +96,33 @@ Helpers: `set/point/value/numeric/has/confidence`, `is_position_event`,
 **users** — `telegram_id` (pk), `chat_id`, `username`, `first_name`,
 `is_subscribed`, `is_blocked`, `alerts_received`, `created_at`, `last_seen_at`.
 
-**settings** — `key` (pk), `value` (text), `updated_by`, `updated_at`.
-Keys: monitoring, public mode, threshold(s), cooldown, coins mode, alert
-toggles, window. The database wins over the environment after first boot.
+**settings** — `key` (pk), `value` (text, JSON-encoded), `updated_by`,
+`updated_at`. Keys: monitoring, paused, public mode, threshold(s), margin gate,
+cooldown, coins mode, alert toggles, window, and `bootstrapped_at`.
+
+The database wins over the environment after first boot, and **only** after it:
+`SettingsService.load()` writes a row only when that key is absent, so a start can
+never overwrite an admin's value with an environment default. `bootstrapped_at` is
+the marker that makes "has this installation been initialised?" a stored fact
+rather than an inference from an empty table — it is what stops a deliberately
+empty coin list from being re-seeded with `DEFAULT_COINS` on the next redeploy.
+It is excluded from `BOOL_KEYS` and from the toggle machinery: it is a fact about
+the installation, not a preference.
+
+Writes are field-level. `SettingsRepository.set(session, key, value)` touches one
+row; `SettingsService` then rebuilds the frozen `RuntimeConfig` from the cache plus
+that one field. No code path rewrites the whole settings table except
+`SettingsService.reset_to_defaults()`, which is reachable only from
+`/resetsettings` after an explicit confirmation.
 
 **tracked_coins** — `coin` (pk), `enabled`, `added_by`, `created_at`.
+The normalized coin store: adding HYPE inserts one row and leaves BTC/ETH/SOL
+untouched. `CoinRepository.replace()` is a **diff** — it inserts what is missing,
+deletes what is no longer wanted, and returns `(added, removed)`. It is not a
+`DELETE FROM tracked_coins` followed by re-inserts, which would discard `added_by`
+and `created_at` for unchanged coins and would make two concurrent admins
+destructive to each other. `add`/`remove` are the patch operations; only a caller
+that explicitly means "make the list exactly this" (`/setcoins`) calls `replace`.
 
 **tracked_wallets** — `address` (pk), `label`, `added_by`, `created_at`.
 Pinned into the focus slate.
@@ -114,7 +136,13 @@ Pinned into the focus slate.
 `take_profit_px`, `stop_loss_px`, `position_value`, `order_id`, `status`,
 `detail` (JSON: the full DataPoint set with confidences), `dedup_key`,
 `event_time`, `created_at`, `alerted`.
-Indexes: `(coin, event_time)`, `(event_type, event_time)`, `notional`, `wallet`.
+Indexes: `(coin, event_time)`, `(event_type, event_time)`, `notional`, `wallet`,
+`dedup_key`.
+`dedup_key` is indexed but deliberately **not** UNIQUE. Trade identity already
+includes the exchange `tid`, so duplicates from a websocket reconnect are caught by
+`EventRepository.seen_recently(key, since)` within the 1-hour `IDENTITY_TTL`. A hard
+UNIQUE would permanently block a legitimate repeat of an identical position change —
+over-deduplication, which loses real events.
 
 **orders** — `id`, `oid`, `wallet`, `coin`, `side`, `limit_px`, `size`,
 `orig_size`, `notional`, `orig_notional`, `order_type`, `is_trigger`,

@@ -248,10 +248,39 @@ class CoinRepository:
         return True
 
     @staticmethod
-    async def replace(session: AsyncSession, coins: Sequence[str], admin_id: int | None = None) -> None:
-        await session.execute(delete(TrackedCoin))
-        for coin in dict.fromkeys(c.upper() for c in coins):
-            session.add(TrackedCoin(coin=coin, enabled=True, added_by=admin_id))
+    async def replace(
+        session: AsyncSession, coins: Sequence[str], admin_id: int | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Make the enabled set exactly ``coins``, touching only what differs.
+
+        Returns ``(added, removed)``. This is deliberately a diff and not a
+        ``DELETE FROM tracked_coins`` followed by re-inserts: a full rewrite
+        discards ``added_by`` and ``created_at`` for coins that were not changing,
+        and — worse — it makes two admins working at the same time destructive to
+        each other, because the second write would resurrect rows the first one
+        removed. Only the caller that explicitly means "make the list exactly
+        this" should call it at all; ``add``/``remove`` are the patch operations.
+        """
+        wanted = list(dict.fromkeys(c.upper() for c in coins if c.strip()))
+        existing = {row.coin: row for row in await CoinRepository.all(session)}
+
+        added: list[str] = []
+        for coin in wanted:
+            row = existing.get(coin)
+            if row is None:
+                session.add(TrackedCoin(coin=coin, enabled=True, added_by=admin_id))
+                added.append(coin)
+            elif not row.enabled:
+                row.enabled = True
+                added.append(coin)
+
+        removed: list[str] = []
+        for coin, row in existing.items():
+            if coin not in wanted:
+                await session.delete(row)
+                removed.append(coin)
+
+        return added, sorted(removed)
 
 
 # ── wallets ────────────────────────────────────────────────────

@@ -57,6 +57,11 @@ class Capability(str, Enum):
     VIEW_STATS = "view_stats"
     VIEW_AUDIT = "view_audit"
     MANAGE_WALLETS = "manage_wallets"
+    #: Wipe every setting back to its environment default. Its own capability,
+    #: and main-admin only: a co-admin may change any individual setting, but a
+    #: single command that discards all of them at once is a different kind of
+    #: act — one mistake would undo every deliberate choice on the deployment.
+    RESET_SETTINGS = "reset_settings"
 
 
 #: Capabilities that a co-admin shares with the main admin.
@@ -78,7 +83,7 @@ CO_ADMIN_CAPABILITIES = frozenset(
 #: Main-admin-only capabilities. MANAGE_ADMINS is deliberately absent above:
 #: a co-admin can neither add nor remove another co-admin.
 MAIN_ONLY_CAPABILITIES = frozenset(
-    {Capability.MANAGE_ADMINS, Capability.VIEW_AUDIT}
+    {Capability.MANAGE_ADMINS, Capability.VIEW_AUDIT, Capability.RESET_SETTINGS}
 )
 
 #: What an ordinary user may do, and only while public mode is on.
@@ -192,6 +197,11 @@ class AdminService:
             return (
                 "🚫 Only the Main Admin can manage administrators.\n"
                 "Co-Admins cannot add or remove other admins."
+            )
+        if capability is Capability.RESET_SETTINGS and role == ROLE_CO:
+            return (
+                "🚫 Only the Main Admin can reset all settings.\n"
+                "You can still change any individual setting."
             )
         if role == ROLE_USER and not public_mode:
             return (

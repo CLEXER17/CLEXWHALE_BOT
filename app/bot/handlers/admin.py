@@ -260,12 +260,19 @@ async def cmd_setcoins(update: Update, context: ContextTypes.DEFAULT_TYPE, actor
         return
 
     unknown = unknown_coins(container, coins)
+    # The one coin command that legitimately replaces the list, because the verb
+    # is "set". Every other path adds or removes a single coin (spec §3/§34).
     await container.settings.set_coins(coins, actor.telegram_id)
+    added, removed = container.settings.last_coin_diff
     # Leaving ALL COINS on would make an explicit selection meaningless.
     if container.settings.config.all_coins:
         await container.settings.set_value("all_coins", False, actor.telegram_id)
 
-    await respond(update, texts.coins_updated(container.settings.config), edit=False)
+    await respond(
+        update,
+        texts.coins_replaced(container.settings.config, added, removed),
+        edit=False,
+    )
     for coin in unknown:
         await respond(update, texts.unknown_coin(coin), edit=False)
 
@@ -282,16 +289,17 @@ async def cmd_addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE, actor:
         await respond(update, texts.invalid_coin(args[0]), edit=False)
         return
 
-    added: list[str] = []
-    for coin in coins:
-        if await container.settings.add_coin(coin, actor.telegram_id):
-            added.append(coin)
+    # A pure PATCH: each coin is inserted on its own row, so BTC/ETH/SOL are
+    # untouched by /addcoin HYPE and a repeated /addcoin HYPE is a no-op rather
+    # than a duplicate (spec §3).
+    added, present = await container.settings.add_coins(coins, actor.telegram_id)
     unknown = unknown_coins(container, coins)
 
-    if added:
-        await respond(update, texts.coins_updated(container.settings.config), edit=False)
-    else:
-        await respond(update, "ℹ️ Already monitored.", edit=False)
+    await respond(
+        update,
+        texts.coins_added(container.settings.config, added, present),
+        edit=False,
+    )
     for coin in unknown:
         await respond(update, texts.unknown_coin(coin), edit=False)
 
@@ -483,6 +491,33 @@ async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: A
     await respond(update, text, keyboard, edit=False)
 
 
+# ── persistence (spec §27, §23) ────────────────────────────────
+@requires(Capability.CHANGE_SETTINGS)
+async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor) -> None:
+    """Show the stored configuration, read from the database rather than the cache."""
+    container = get_container(context)
+    text, keyboard = await views.config_view(container)
+    await respond(update, text, keyboard, edit=False)
+
+
+@requires(Capability.RESET_SETTINGS)
+async def cmd_resetsettings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, actor: Actor
+) -> None:
+    """Two-step reset. Step one only *describes* what would be lost (spec §23).
+
+    ``/resetsettings`` on its own never changes anything; the confirmation button
+    carries the actual reset. No ordinary settings command may reach this path.
+    """
+    container = get_container(context)
+    await respond(
+        update,
+        texts.confirm_reset_settings(container.settings.config),
+        inline.confirm_reset_settings(),
+        edit=False,
+    )
+
+
 __all__ = [
     "MAX_THRESHOLD",
     "MIN_THRESHOLD",
@@ -493,11 +528,13 @@ __all__ = [
     "cmd_admins",
     "cmd_allcoins",
     "cmd_audit",
+    "cmd_config",
     "cmd_cooldown",
     "cmd_margin",
     "cmd_public",
     "cmd_removeadmin",
     "cmd_removecoin",
+    "cmd_resetsettings",
     "cmd_setcoins",
     "cmd_setmargin",
     "cmd_settings",

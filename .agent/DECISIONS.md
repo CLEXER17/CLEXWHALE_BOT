@@ -152,6 +152,65 @@ explicitly by `Runtime.start()`, is still registered on the builder so
 `run_polling` would also work, and is guarded by a `bot_data` flag so the double
 call cannot publish the menu twice.
 
+**DECISION:** Wallet addresses are shown in full. (Supersedes the truncation
+decision above.)
+**REASON:** The audit reported `0x3200...c407` as unusable — a reader cannot paste
+it into a block explorer, and two different wallets can share the same first and
+last four characters. The canonical value is never shortened: not in the database,
+not in an alert body, not in a list view. `short_wallet()` survives for one
+purpose only, inline-button labels, where Telegram's 64-byte limit is a hard
+constraint and the full address is one tap away anyway. Monospace and the
+no-real-world-identity rule from that earlier entry both still hold.
+
+**DECISION:** `CoinRepository.replace()` is a diff, not delete-all-then-insert.
+**REASON:** The obvious implementation of "make the list exactly this" is
+`DELETE FROM tracked_coins` followed by inserts, and it is wrong three ways.
+It discards `added_by` and `created_at` for coins that were not changing, so the
+audit trail of who started monitoring BTC is lost every time an unrelated coin is
+added. It makes two admins editing concurrently destructive to each other: the
+second write re-inserts the row the first just removed. And it makes every
+whole-list operation look identical in the database to a genuine reset, so
+"nothing was removed" is unprovable after the fact. The diff inserts what is
+missing, deletes only what is genuinely no longer wanted, and **returns**
+`(added, removed)` — which is what lets `/setcoins` name every coin it dropped
+instead of reporting a silent success. `add`/`remove` remain the patch
+operations; `replace` is reached only from `/setcoins` and the confirmed 🧹 Clear.
+
+**DECISION:** Record a `bootstrapped_at` marker rather than inferring first boot
+from an empty table.
+**REASON:** "Apply defaults only when no configuration exists" needs a definition
+of *exists*. An empty `tracked_coins` table is ambiguous — it is either a brand-new
+installation or an admin who deliberately stopped monitoring everything — and
+guessing wrong resurrects `DEFAULT_COINS` on the next redeploy, which is exactly
+the reported symptom. One row turns the question into a stored fact. It is
+excluded from `BOOL_KEYS` and the toggle machinery because it is a property of the
+installation, not a preference, and `startup_summary()` reports the answer as
+`seeded` vs `loaded` so an unexpected reset shows up in the Railway log rather
+than being discovered later by a missing alert.
+
+**DECISION:** `whale_events.dedup_key` is indexed but deliberately **not** UNIQUE.
+**REASON:** A UNIQUE constraint is the tempting answer to "do not create duplicate
+alerts because the WebSocket reconnects", and it would work — at the cost of
+losing real events forever. Trade identity already includes the exchange `tid`, so
+a genuine replay is caught by `EventRepository.seen_recently(key, since)` within
+the 1-hour `IDENTITY_TTL`. What UNIQUE would additionally block is a *legitimate*
+repeat: the same wallet making the identical position change to the same size on
+the same coin a day later hashes to the same key, and the database would refuse to
+record it. Over-deduplication is the worse failure — a duplicate alert is noise a
+reader can dismiss, a missing alert is a whale they never heard about. A
+time-bounded check in code can express "recently"; a UNIQUE index cannot.
+
+**DECISION:** `/resetsettings` gets its own capability, `RESET_SETTINGS`, in
+`MAIN_ONLY_CAPABILITIES` — not `CHANGE_SETTINGS`.
+**REASON:** A co-admin is trusted to change any individual setting, which is what
+`CHANGE_SETTINGS` means. One command that discards all of them at once is a
+different kind of act, closer to `MANAGE_ADMINS` than to `/setthreshold`, and
+reusing the broader capability would have made it available to every co-admin as a
+side effect of a permission granted for something else. It is also two-step: the
+command renders a confirmation and only `reset:confirm` acts, and that callback is
+re-authorised against the pressing user's id, so a forged payload from a co-admin
+hits the same refusal as the command.
+
 **DECISION:** The secret redactor preserves the type of every `record.args`
 entry; only strings are scrubbed unconditionally.
 **REASON:** `record.args` is consumed as `msg % args`. Coercing entries to `str`

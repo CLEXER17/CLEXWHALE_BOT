@@ -14,6 +14,7 @@ Two rules run through everything here:
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Any, Mapping, Sequence
 
 from app.services.settings_service import RuntimeConfig
@@ -55,8 +56,12 @@ PROMPT_MARGIN = (
     "Example: <code>2000000</code> for $2,000,000. Send <code>0</code> to turn the gate off."
 )
 PROMPT_COINS = (
-    "Send the coins to monitor, separated by spaces.\n"
-    "Example: <code>BTC ETH SOL</code>"
+    "Send the coins to <b>add</b>, separated by spaces.\n"
+    "Example: <code>BTC ETH SOL</code>\n"
+    "\n"
+    "These are added to what is already monitored — nothing is removed.\n"
+    "To remove one, tap it in the coin list. To replace the whole list,\n"
+    "use <code>/setcoins BTC ETH</code>."
 )
 PROMPT_COOLDOWN = "Send the alert cooldown in seconds (0–3600)."
 PROMPT_WALLET = "Send the wallet address to watch (0x…)."
@@ -168,8 +173,8 @@ def help_text(*, admin: bool, main_admin: bool) -> str:
             "/margin — show the margin gate",
             "/setmargin &lt;USD&gt; — alert only above this margin (0 = off)",
             "/cooldown &lt;seconds&gt; — per-signal cooldown",
-            "/setcoins BTC ETH SOL — replace the coin list",
-            "/addcoin XRP — add one coin",
+            "/setcoins BTC ETH SOL — <b>replace</b> the whole coin list",
+            "/addcoin XRP — add a coin, keeping the rest",
             "/removecoin SOL — remove one coin",
             "/allcoins on|off — monitor every coin",
             "",
@@ -184,6 +189,7 @@ def help_text(*, admin: bool, main_admin: bool) -> str:
             "",
             "<b>Diagnostics</b>",
             "/stats — system statistics",
+            "/config — the stored configuration",
             "/panel — control panel",
         ]
     if main_admin:
@@ -193,6 +199,7 @@ def help_text(*, admin: bool, main_admin: bool) -> str:
             "/addadmin &lt;user id&gt; — add a Co-Admin",
             "/removeadmin &lt;user id&gt; — remove a Co-Admin",
             "/audit — recent admin actions",
+            "/resetsettings — reset every setting (asks first)",
         ]
     return "\n".join(lines)
 
@@ -283,7 +290,8 @@ def coins_panel(config: RuntimeConfig, monitored: Sequence[str] = (), skipped: i
             lines.append(f"<b>Active feeds:</b> {escape_html(', '.join(monitored))}")
     lines += [
         DIVIDER,
-        "Commands: /setcoins BTC ETH SOL · /addcoin XRP · /removecoin SOL",
+        "Add: /addcoin XRP · Remove: /removecoin SOL",
+        "Replace the whole list: /setcoins BTC ETH SOL",
     ]
     return "\n".join(lines)
 
@@ -1004,6 +1012,195 @@ def cooldown_updated(seconds: int) -> str:
 
 def coins_updated(config: RuntimeConfig) -> str:
     return f"✅ Monitored coins: <b>{escape_html(config.coin_label)}</b>"
+
+
+def coins_added(
+    config: RuntimeConfig, added: Sequence[str], already: Sequence[str] = ()
+) -> str:
+    """Report an *additive* change, naming what was added and what already was.
+
+    Saying "already monitored" out loud matters: repeating /addcoin HYPE must be
+    a no-op with a clear answer, not a silent success that leaves the admin
+    wondering whether a duplicate was created (spec §3).
+    """
+    lines: list[str] = []
+    if added:
+        lines.append(f"✅ Added: <b>{escape_html(' '.join(added))}</b>")
+    for coin in already:
+        lines.append(f"ℹ️ <code>{escape_html(coin)}</code> was already monitored.")
+    if not lines:
+        lines.append("ℹ️ Nothing to add.")
+    lines.append(f"🪙 Monitored coins: <b>{escape_html(config.coin_label)}</b>")
+    return "\n".join(lines)
+
+
+def coins_replaced(
+    config: RuntimeConfig, added: Sequence[str], removed: Sequence[str]
+) -> str:
+    """Report an explicit whole-list replacement, including what it removed.
+
+    /setcoins is allowed to remove, but never quietly: a removal an admin did not
+    intend must be visible in the reply rather than discovered later by a missing
+    alert (spec §22).
+    """
+    lines = [f"✅ Monitored coins: <b>{escape_html(config.coin_label)}</b>"]
+    if added:
+        lines.append(f"➕ Added: <b>{escape_html(' '.join(added))}</b>")
+    if removed:
+        lines.append(f"➖ Removed: <b>{escape_html(' '.join(removed))}</b>")
+        lines.append("<i>/setcoins replaces the list. Use /addcoin to add without removing.</i>")
+    if not added and not removed:
+        lines.append("<i>No change — the list already matched.</i>")
+    return "\n".join(lines)
+
+
+def confirm_clear_coins(config: RuntimeConfig) -> str:
+    return "\n".join(
+        [
+            "⚠️ <b>Clear the coin list?</b>",
+            "",
+            f"This removes all {len(config.coins)} monitored coin(s):",
+            f"<b>{escape_html(config.coin_label)}</b>",
+            "",
+            "With an empty list and ALL COINS off, <b>nothing will be monitored</b>.",
+            "This cannot be undone — the coins would have to be added again.",
+        ]
+    )
+
+
+def coins_cleared(removed: Sequence[str]) -> str:
+    if not removed:
+        return "ℹ️ The coin list was already empty."
+    return "\n".join(
+        [
+            f"🧹 Cleared <b>{len(removed)}</b> coin(s): {escape_html(' '.join(removed))}",
+            "",
+            "⚠️ Nothing is being monitored now. Add coins to resume alerts.",
+        ]
+    )
+
+
+def confirm_reset_settings(config: RuntimeConfig) -> str:
+    return "\n".join(
+        [
+            "⚠️ <b>Reset all settings to defaults?</b>",
+            "",
+            "This replaces every setting you have changed:",
+            f"• Threshold — currently <b>{fmt_usd_full(config.min_whale_value)}</b>",
+            f"• Coins — currently <b>{escape_html(config.coin_label)}</b>",
+            f"• Mode — currently <b>{'PUBLIC' if config.public_mode else 'PRIVATE'}</b>",
+            "• All alert toggles, the margin gate and the cooldown",
+            "",
+            "<b>Kept:</b> admins and co-admins, users, watched wallets, and",
+            "recorded whale history. Only settings are reset.",
+            "",
+            "This cannot be undone.",
+        ]
+    )
+
+
+def settings_reset(config: RuntimeConfig) -> str:
+    return "\n".join(
+        [
+            "♻️ <b>Settings reset to defaults.</b>",
+            "",
+            f"Threshold: <b>{fmt_usd_full(config.min_whale_value)}</b>",
+            f"Coins: <b>{escape_html(config.coin_label)}</b>",
+            f"Mode: <b>{'PUBLIC' if config.public_mode else 'PRIVATE'}</b>",
+            "",
+            "Admins, users, watched wallets and whale history were kept.",
+        ]
+    )
+
+
+def _same_value(live: Any, stored: Any) -> bool:
+    """Compare a cached field against its stored row, tolerating float noise."""
+    if isinstance(live, bool) or isinstance(stored, bool):
+        return bool(live) == bool(stored)
+    if isinstance(live, (int, float)) and isinstance(stored, (int, float)):
+        return abs(float(live) - float(stored)) < 1e-6
+    return live == stored
+
+
+def config_snapshot(
+    *,
+    values: Mapping[str, Any],
+    coins: Sequence[str],
+    admins: Sequence[Mapping[str, Any]],
+    wallets: Sequence[str],
+    subscribers: int,
+    cached: RuntimeConfig,
+    durable: bool,
+    bootstrapped_at: str | None = None,
+) -> str:
+    """``/config`` — what the database actually holds (spec §27).
+
+    Every number here comes from a table read, so the panel cannot confirm itself:
+    if the running cache has drifted from the stored rows, this is where it shows.
+    No connection string, token or credential appears — only the backend kind.
+    """
+    field_names = {f.name for f in fields(cached)}
+    drift = [
+        key
+        for key, stored in values.items()
+        if key in field_names and not _same_value(getattr(cached, key), stored)
+    ]
+    stored_coins = tuple(sorted({c.upper() for c in coins}))
+    if stored_coins != cached.coins:
+        drift.append("coins")
+
+    main = [a for a in admins if str(a.get("role", "")).upper().startswith("MAIN")]
+    co = [a for a in admins if a not in main]
+
+    def stored_bool(key: str, default: bool) -> str:
+        raw = values.get(key, default)
+        return "ON" if bool(raw) else "OFF"
+
+    threshold = values.get("min_whale_value", cached.min_whale_value)
+    margin = float(values.get("min_margin_value") or 0.0)
+    lines = [
+        "🗄 <b>PERSISTENT CONFIGURATION</b>",
+        DIVIDER,
+        f"Storage: <b>{'PostgreSQL' if durable else 'SQLite'}</b>"
+        + ("" if durable else " — <b>local file, not durable on Railway</b>"),
+        f"Stored setting rows: <b>{len(values)}</b>",
+    ]
+    if bootstrapped_at:
+        lines.append(f"Initialised: <code>{escape_html(str(bootstrapped_at))}</code>")
+    lines += [
+        "",
+        "<i>Read directly from the database, not from the running cache.</i>",
+        "",
+        f"💵 Threshold: <b>{fmt_usd_full(float(threshold or 0.0))}</b>",
+        f"🛡 Margin gate: <b>{fmt_usd_full(margin) if margin > 0 else 'off'}</b>",
+        f"⏱ Cooldown: <b>{int(values.get('alert_cooldown_seconds', 0) or 0)}s</b>",
+        f"🪙 Coins ({len(stored_coins)}): "
+        + (f"<b>{escape_html(' '.join(stored_coins))}</b>" if stored_coins else "<b>none</b>"),
+        f"   Selection: <b>{'ALL COINS' if values.get('all_coins') else 'SELECTED'}</b>",
+        f"🌐 Mode: <b>{'PUBLIC' if values.get('public_mode') else 'PRIVATE'}</b>",
+        f"📡 Monitoring: <b>{stored_bool('monitoring_enabled', True)}</b>"
+        f" · Paused: <b>{'YES' if values.get('paused') else 'no'}</b>",
+        f"🔔 Trades: <b>{stored_bool('enable_trade_detector', True)}</b>"
+        f" · Positions: <b>{stored_bool('enable_position_detector', True)}</b>"
+        f" · Orders: <b>{stored_bool('enable_order_alerts', False)}</b>",
+        f"👑 Admins: <b>{len(main)}</b> main, <b>{len(co)}</b> co-admin",
+        f"👛 Watched wallets: <b>{len(wallets)}</b>",
+        f"👥 Alert subscribers: <b>{subscribers}</b>",
+        "",
+    ]
+    if drift:
+        lines.append(
+            "⚠️ <b>Cache differs from the database:</b> "
+            f"<code>{escape_html(', '.join(sorted(set(drift))))}</code>"
+        )
+        lines.append("Restart to reload from the database, then re-check.")
+    else:
+        lines.append("✅ The running configuration matches the database exactly.")
+    if durable:
+        lines.append("✅ These values survive a restart and a redeploy.")
+    else:
+        lines.append("⚠️ Set <code>DATABASE_URL</code> to Postgres for durable storage.")
+    return "\n".join(lines)
 
 
 def unknown_command() -> str:

@@ -23,14 +23,18 @@ from app.bot.keyboards import inline
 from app.bot.messages import texts
 from app.container import AppContainer
 from app.database.repository import (
+    AdminRepository,
     AuditRepository,
+    CoinRepository,
     EventRepository,
     OrderRepository,
     PositionRepository,
+    SettingsRepository,
     UserRepository,
     WalletRepository,
 )
 from app.services.admin_service import Actor, ROLE_CO
+from app.services.settings_service import SettingsService
 from app.utils.formatting import utc_now
 
 View = tuple[str, InlineKeyboardMarkup | None]
@@ -117,6 +121,38 @@ async def settings_view(container: AppContainer) -> View:
 async def alert_settings_view(container: AppContainer) -> View:
     config = container.settings.config
     return texts.alert_settings(config), inline.alert_settings_panel(config)
+
+
+async def config_view(container: AppContainer) -> View:
+    """The persistence snapshot (spec §27).
+
+    Deliberately reads the ``settings``, ``tracked_coins``, ``admins`` and
+    ``tracked_wallets`` tables *directly* rather than ``container.settings.config``.
+    Every other view renders the in-memory cache, which is the right thing for a
+    control panel — but it cannot answer the question this command exists for:
+    "is my configuration actually stored, and will it survive the next redeploy?"
+    Reading the rows makes a cache that has drifted from the database visible
+    instead of self-confirming.
+    """
+    settings = container.settings
+    async with container.db.session() as session:
+        stored = await SettingsRepository.all(session)
+        coins = await CoinRepository.enabled(session)
+        admins = await AdminRepository.list(session)
+        wallets = [row.address for row in await WalletRepository.tracked(session)]
+        subscribers = len(await UserRepository.subscribers(session))
+    values = {key: SettingsService.decode_stored(raw) for key, raw in stored.items()}
+    text = texts.config_snapshot(
+        values=values,
+        coins=coins,
+        admins=[{"telegram_id": row.telegram_id, "role": row.role} for row in admins],
+        wallets=wallets,
+        subscribers=subscribers,
+        cached=settings.config,
+        durable=not container.db.is_sqlite,
+        bootstrapped_at=settings.bootstrapped_at,
+    )
+    return text, inline.settings_panel(settings.config)
 
 
 async def public_mode_view(container: AppContainer) -> View:

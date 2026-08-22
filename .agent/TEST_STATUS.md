@@ -19,32 +19,34 @@ required.
 
 | | |
 |---|---|
-| **TOTAL** | **474** |
-| **PASSED** | **474** |
+| **TOTAL** | **555** |
+| **PASSED** | **555** |
 | **FAILED** | **0** |
 | **SKIPPED** | **0** |
 | xfailed / errors | 0 |
-| Wall time | 28.58 s |
+| Wall time | 33.60 s |
 
 ## Per module (each run on its own)
 
 | Module | Tests | Result | Time |
 |---|---|---|---|
-| `tests/test_admin_ui_integrity.py` | 32 | 32 passed | 4.61 s |
-| `tests/test_bot_application.py` | 7 | 7 passed | 4.71 s |
-| `tests/test_config.py` | 34 | 34 passed | 0.22 s |
-| `tests/test_database.py` | 68 | 68 passed | 6.60 s |
-| `tests/test_dedup.py` | 21 | 21 passed | 0.13 s |
-| `tests/test_detector_orders.py` | 23 | 23 passed | 0.10 s |
+| `tests/test_admin_ui_integrity.py` | 32 | 32 passed | 1.84 s |
+| `tests/test_bot_application.py` | 7 | 7 passed | 2.13 s |
+| `tests/test_config.py` | 34 | 34 passed | 0.09 s |
+| `tests/test_database.py` | 68 | 68 passed | 2.98 s |
+| `tests/test_dedup.py` | 27 | 27 passed | 0.12 s |
+| `tests/test_detector_liquidations.py` | 30 | 30 passed | 0.08 s |
+| `tests/test_detector_orders.py` | 23 | 23 passed | 0.05 s |
 | `tests/test_detector_positions.py` | 23 | 23 passed | 0.05 s |
-| `tests/test_detector_trades.py` | 17 | 17 passed | 0.09 s |
-| `tests/test_engine_pipeline.py` | 22 | 22 passed | 9.56 s |
-| `tests/test_filters.py` | 28 | 28 passed | 0.08 s |
-| `tests/test_global_pause.py` | 15 | 15 passed | 2.93 s |
-| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.11 s |
-| `tests/test_permissions.py` | 48 | 48 passed | 7.20 s |
-| `tests/test_resilience.py` | 50 | 50 passed | 4.90 s |
-| `tests/test_telegram_handlers.py` | 66 | 66 passed | 9.98 s |
+| `tests/test_detector_trades.py` | 17 | 17 passed | 0.05 s |
+| `tests/test_engine_pipeline.py` | 33 | 33 passed | 10.09 s |
+| `tests/test_filters.py` | 33 | 33 passed | 0.05 s |
+| `tests/test_global_pause.py` | 15 | 15 passed | 1.20 s |
+| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.05 s |
+| `tests/test_permissions.py` | 48 | 48 passed | 3.51 s |
+| `tests/test_persistence.py` | 29 | 29 passed | 2.97 s |
+| `tests/test_resilience.py` | 50 | 50 passed | 5.57 s |
+| `tests/test_telegram_handlers.py` | 66 | 66 passed | 6.94 s |
 
 The per-module times sum to more than the full-suite wall time because each row
 pays its own interpreter and fixture start-up. The wall time is also not stable
@@ -73,13 +75,13 @@ Hyperliquid shapes).
 | Co-admin permission checks | `test_permissions.py` (the §29 matrix, including every action a co-admin must be refused) |
 | Public / private mode | `test_permissions.py`, `test_telegram_handlers.py` |
 | Telegram callback handling | `test_telegram_handlers.py` (including forged `callback_data` from an unauthorised user), `test_admin_ui_integrity.py` (no builder emits a wallet or an oversized payload) |
-| Database operations | `test_database.py` (all 11 repositories, commit/rollback, unique constraints, restart/redeploy restore) |
+| Database operations | `test_database.py` (all 11 repositories, commit/rollback, unique constraints, restart/redeploy restore), `test_persistence.py` (patch semantics, defaults-only-where-absent, redeploy survival) |
 | WebSocket reconnect | `test_resilience.py` (drop → reconnect → resubscribe, backoff ladder, cap, no leaked reader) |
 | API failure handling | `test_resilience.py` (429 / 5xx / 4xx / timeout / unparseable body / exhausted budget) |
 | Invalid command input | `test_telegram_handlers.py`, `test_config.py` |
 | Unauthorized user rejection | `test_permissions.py`, `test_telegram_handlers.py` |
 | Unit tests | all modules |
-| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py`, `test_bot_application.py` |
+| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py`, `test_bot_application.py`, `test_persistence.py` |
 
 ## What the end-to-end pipeline test actually asserts
 
@@ -120,6 +122,33 @@ deliberate exemptions (`/go`, `/status`, `/panel`, `/stop`); that
 `monitoring_enabled` is left exactly as configured; that nothing is delivered
 while paused; and that the pause survives a redeploy through two fresh
 `AppContainer.restore()` cycles.
+
+## Beyond §36: persistence and settings safety
+
+`tests/test_persistence.py` (29 tests) is the regression suite for the two
+reported production symptoms: *"changing one setting replaces other settings"* and
+*"settings are lost after a Railway redeploy"*. Every test asserts one of two
+things — that **a change is a patch** (after it, everything the caller did not name
+is unchanged), or that **a value survives a new process** reading the same
+database. A restart is `SettingsService(database, env).load()`; a redeploy is a
+brand-new `AppContainer(env, database).restore()`, which is what Railway does to a
+container: fresh caches, fresh services, same rows.
+
+| Group | What it asserts |
+|---|---|
+| A coin addition is a patch | `/addcoin HYPE` on BTC/ETH/SOL yields **BTC ETH HYPE SOL**, not HYPE; the second `/addcoin HYPE` is a no-op that says "already monitored" and creates no duplicate row; the `➕ Add coins` prompt adds; the per-coin toggle button behaves exactly like the command |
+| One setting at a time | `/setthreshold` does not touch the coin list; changing the threshold leaves 11 named fields byte-identical; toggling one alert switch leaves the others and the coins alone |
+| Durability | the §33 acceptance sequence (add HYPE → change threshold → restart → redeploy) survives twice over; public mode, watched wallets (untruncated), the global pause, co-admin **role**, and each alert toggle all come back |
+| Defaults only where nothing exists | a stored threshold is never overwritten by the environment default; a deliberately empty coin list is not re-seeded; `bootstrapped_at` is written once and read back; an empty database *does* get the defaults |
+| Nothing removed without an explicit remove | `/setcoins` replaces but names every removal; `replace` leaves the unchanged rows' `created_at` intact; 🧹 Clear needs the second tap; `/resetsettings` alone changes nothing; a confirmed reset restores defaults yet keeps wallets and co-admins, and the reset itself persists |
+| Authority | a co-admin's forged `reset:confirm` is refused server-side |
+| `/config` | reads the stored rows, reports cache-vs-database drift when a row is edited underneath it, prints no credential, and is refused to a stranger |
+| Startup summary | counts and states only, no token or URL; `ephemeral` on SQLite, `durable` on Postgres |
+
+The suite was mutation-checked against the actual bug: reverting the coins prompt
+to `set_coins()` makes
+`test_the_add_coins_prompt_adds_instead_of_replacing` fail with
+`('HYPE',) != ('BTC', 'ETH', 'HYPE', 'SOL')` — the exact reported symptom.
 
 ## Defects this suite found (fixed)
 
@@ -203,6 +232,27 @@ third-party call degrades to one line instead of a traceback per occurrence.
 messages with no `args`. Six new tests in `test_config.py` cover numeric args,
 mixed args, dict-style args, secrets passed as args, secrets hidden inside
 non-string args, and both formatters' degradation path.
+
+### 5. The coin prompt replaced the whole list instead of adding to it
+
+Reported as *"when I change one setting, the bot unnecessarily replaces other
+existing settings."* Root-caused to exactly one path, not a systemic problem: the
+coin panel's `✏️ Set list` button opened a prompt whose handler
+(`app/bot/handlers/prompts.py`, `kind == "coins"`) called
+`settings.set_coins()`. An admin monitoring BTC/ETH/SOL who answered `HYPE` was
+left monitoring only HYPE — a replacement dressed up as an addition. Everything
+else in the settings layer was already patch-based.
+
+Fixed by calling `add_coins()`, relabelling the button `➕ Add coins`, and
+rewording the prompt to say "add". Removal keeps its own explicit paths:
+`/removecoin`, the per-coin toggle, `/setcoins`, and the now two-step 🧹 Clear.
+
+**Why the suite missed it:** the existing prompt tests asserted that the answer
+was *applied*, never that the previous list *survived*. The distinction only shows
+when the pre-existing state is non-empty and different from the answer.
+`tests/test_persistence.py::test_the_add_coins_prompt_adds_instead_of_replacing`
+sets BTC/ETH/SOL first, and was verified to fail against the old code with
+`('HYPE',)`.
 
 ## Known limitations of this suite
 

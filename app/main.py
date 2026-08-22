@@ -187,16 +187,30 @@ class Runtime:
             log.exception("Hyperliquid ingestion failed to start; running degraded")
 
         config = container.settings.config
+        summary = container.startup_summary()
         log.info(
             "Startup complete",
-            extra={
-                "monitoring": config.monitoring_enabled,
-                "public_mode": config.public_mode,
-                "threshold": config.min_whale_value,
-                "coins": config.coin_label,
-                "port": self.env.port,
-            },
+            extra={**summary, "port": self.env.port},
         )
+        # Also as plain lines: this is the block an operator reads in the Railway
+        # log after a redeploy to confirm nothing reverted to defaults. Values
+        # only — never the connection string or the token (spec §26).
+        for line in (
+            f"Database ......... CONNECTED ({summary['database']}, {summary['persistence']})",
+            f"Configuration .... {summary['configuration'].upper()}"
+            + (" — first boot, defaults seeded" if container.settings.first_boot else " from database"),
+            f"Enabled coins .... {summary['coins']}",
+            f"Threshold ........ ${config.min_whale_value:,.0f}",
+            f"Mode ............. {summary['mode'].upper()}",
+            f"Admins ........... {summary['admins']} ({summary['co_admins']} co-admin)",
+            f"Watched wallets .. {summary['watched_wallets']}",
+        ):
+            log.info(line)
+        if container.db.is_sqlite:
+            log.warning(
+                "SQLite is in the container filesystem: settings will NOT survive a "
+                "redeploy. Set DATABASE_URL to a PostgreSQL instance for persistence."
+            )
 
     async def _start_http(self) -> None:
         config = uvicorn.Config(

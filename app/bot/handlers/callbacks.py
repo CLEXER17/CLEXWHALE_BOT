@@ -56,6 +56,7 @@ _AREA_CAPABILITY = {
     inline.CB_ADMIN: Capability.MANAGE_ADMINS,
     inline.CB_PUBLIC: Capability.CHANGE_PUBLIC_MODE,
     inline.CB_SET: Capability.CHANGE_SETTINGS,
+    inline.CB_RESET: Capability.RESET_SETTINGS,
     inline.CB_STATS: Capability.VIEW_STATS,
     inline.CB_DATA: Capability.VIEW_WHALES,
 }
@@ -187,6 +188,10 @@ async def _dispatch(
 
     if area == inline.CB_SET:
         await _settings(update, context, container, actor, action, arg)
+        return
+
+    if area == inline.CB_RESET:
+        await _reset(update, container, actor, action)
         return
 
     if area == inline.CB_STATS:
@@ -342,9 +347,22 @@ async def _coins(
         return
 
     if action == "clear":
+        # Ask first. This is the only coin button that can remove everything, so
+        # it shows what it is about to destroy and changes nothing yet (§22/§23).
+        if not settings.config.coins:
+            await notify(update, "The coin list is already empty.", alert=True)
+            return
+        await respond(
+            update, texts.confirm_clear_coins(settings.config), inline.confirm_clear_coins()
+        )
+        return
+
+    if action == "clearyes":
+        removed = settings.config.coins
         await settings.set_coins([], actor.telegram_id)
+        await respond(update, texts.coins_cleared(removed))
         text, keyboard = await views.coins_view(container, actor)
-        await respond(update, text, keyboard, toast="Coin list cleared")
+        await respond(update, text, keyboard, edit=False)
         return
 
     text, keyboard = await views.coins_view(container, actor)
@@ -455,8 +473,36 @@ async def _settings(
         await respond(update, text, keyboard, toast=f"Cooldown {applied}s")
         return
 
+    if action == "config":
+        text, keyboard = await views.config_view(container)
+        await respond(update, text, keyboard)
+        return
+
     text, keyboard = await views.settings_view(container)
     await respond(update, text, keyboard)
+
+
+async def _reset(
+    update: Update, container: AppContainer, actor: Actor, action: str
+) -> None:
+    """The confirmed settings reset (spec §23).
+
+    Reached only from :func:`app.bot.keyboards.inline.confirm_reset_settings`, and
+    only by the main admin — the area's capability is ``RESET_SETTINGS``, which
+    :meth:`AdminService.can` grants to no one else, so forging ``reset:confirm``
+    gets the same refusal a co-admin would get from the button.
+    """
+    if action != "confirm":
+        await respond(
+            update,
+            texts.confirm_reset_settings(container.settings.config),
+            inline.confirm_reset_settings(),
+        )
+        return
+    config = await container.settings.reset_to_defaults(actor.telegram_id)
+    await respond(update, texts.settings_reset(config))
+    text, keyboard = await views.settings_view(container)
+    await respond(update, text, keyboard, edit=False)
 
 
 async def _tell(context: ContextTypes.DEFAULT_TYPE, telegram_id: int, message: str) -> None:
