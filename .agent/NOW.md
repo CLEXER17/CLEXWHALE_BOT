@@ -1,102 +1,106 @@
 # NOW — resume here, read this file first
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 ---
 
 ## CURRENT TASK
 
-**VERIFIED EXECUTION + POSITION LIFECYCLE** (39-section spec, Tasks A–I).
-Worked as 10 checkpoints: 1 alert service · 2 /recent · 3 /whales ·
-4 summary separation · 5 order-alert toggle · 6 position lifecycle ·
-7 wallet formatting · 8 regression tests · 9 integration · 10 full suite.
+**LIVE VERIFICATION PHASE.** Move OFFLINE VERIFIED → LIVE VERIFIED for the chain
+Railway → PostgreSQL → Hyperliquid WS/REST → detector → alert service → Telegram.
+Runbook: `.agent/LIVE_VERIFICATION.md` (the only other file worth opening).
+
+The implementation phase is over. Observe → record → minimal fix → test.
 
 ## CURRENT SUBTASK
 
-None. Checkpoints 1–10 are complete; documentation is updated and the work is
-committed. What remains needs the deployed bot and is listed under
-USER-OWNED below.
+Step 2 (configuration audit) is done offline. Step 3 onward is blocked — see
+BLOCKED BY.
 
 ## STATUS
 
-**All 10 checkpoints complete and green.**
-
-| # | Checkpoint | State |
+| Step | Item | State |
 |---|---|---|
-| 1 | Alert service: FILLED/EXECUTED → trade alert; PLACED/RESTING/MODIFIED/CANCELLED → internal | done |
-| 2 | `/recent` shows verified executions only | done |
-| 3 | `/whales` wallet stats count executions only | done |
-| 4 | Summary metrics split: executed trades / order events / position events | done |
-| 5 | `enable_order_detector` (detection) split from `enable_order_alerts` (user-facing) | done |
-| 6 | Position lifecycle: SELL ≠ SHORT; zero → CLOSED from last non-zero snapshot | done |
-| 7 | Wallet address never truncated, always monospace, never in `callback_data` | done |
-| 8 | Regression tests (spec requirements 1–24) | done — 28 passed |
-| 9 | Full integration | done |
-| 10 | Complete test suite | done — 587 passed / 0 failed |
+| 1 | Read current state (`NOW.md`, `git status`, `git diff --stat`) | done — clean at `d0194d7` |
+| 2 | Configuration audit: required vars, no hardcoded credentials, `.env` ignored, migrations on boot, healthcheck, single replica | **PASS** (offline) |
+| 2 | Token rotation actually performed | **NOT VERIFIED** — only @BotFather can confirm |
+| 3–12 | Startup, persistence, execution, lifecycle, wallet, toggle, permissions, co-admin, `/recent`, `/whales` | **NOT VERIFIED** — blocked |
 
 ## FILES BEING MODIFIED
 
-None mid-edit.
+None. No code change is expected in this phase unless a live failure proves one.
 
 ## FILES ALREADY COMPLETED
 
-- `tests/test_verified_execution.py` — **new**, 28 tests, all passing.
-- `app/whale/detector.py` — two edits, now covered by the full suite:
-  - `_attach_position` (~L230) treats a *flat* snapshot like a missing one:
-    `position_value` / `entry_px` / `liquidation_px` / `leverage` become
-    `DataPoint.unavailable("no open position for this coin")`.
-  - `from_position_change` (~L713): `reference_entry` is only read from
-    `ctx.position` when that snapshot is not flat.
-- `app/services/alert_service.py` — execution vs order rendering; dead docstring
-  cross-reference fixed (`lifecycle.position_side` → `POSITION_SIDES`).
-- `app/whale/events.py`, `app/whale/filters.py`, `app/bot/views.py`,
-  `app/bot/messages/texts.py`, `app/bot/keyboards/inline.py`,
-  `app/bot/handlers/callbacks.py`, `app/database/repository.py`,
-  `app/hyperliquid/models.py` — checkpoints 1–7.
-- `.agent/TEST_STATUS.md`, `CHANGELOG.md`, `DECISIONS.md`, `PROJECT_STATE.md`,
-  `HANDOFF.md` — updated for this milestone.
+- `.agent/LIVE_VERIFICATION.md` — **new**: the Step 2 audit results, the exact
+  startup lines to look for, the Telegram scripts for steps 4–12, and an evidence
+  table to fill in.
+- Offline work is committed and pushed at `d0194d7` (587 passed / 0 failed).
 
 ## TESTS PASSED
 
-- `./.venv/Scripts/python.exe -m pytest -q` → **587 passed in 49.82 s**
-  (2026-08-22). Per-module counts in `TEST_STATUS.md`.
-- `./.venv/Scripts/python.exe -m compileall -q app/ tests/` → clean.
-- `tests/test_verified_execution.py` alone → 28 passed.
+- `./.venv/Scripts/python.exe -m pytest -q` → **587 passed in 49.82 s** (2026-08-22)
+- `./.venv/Scripts/python.exe -m compileall -q app/ tests/` → clean
 
 ## TESTS FAILED
 
 None.
 
+## BLOCKED BY
+
+**No CLEXWHALE_BOT service exists on Railway.** Checked with the authenticated
+CLI (`clexer123@gmail.com`, workspace *clexer2's Projects*):
+
+- `noble-creation` → `Postgres`, `CENTRAL API` (builds `CLEXER17/CLEXER_BOT`),
+  `CO3` (an Aerolink/Gemini app). None has `BOT_TOKEN`, `MAIN_ADMIN_ID`,
+  `MIN_WHALE_VALUE` or `HYPERLIQUID_WS_URL`. Variable **names** only were read.
+- `devoted-unity` → **no services at all**.
+
+So there is nothing to deploy the current commit to, and nothing to read logs
+from. Creating the service needs `BOT_TOKEN` and `MAIN_ADMIN_ID` typed into the
+Railway dashboard by a human — a token must never enter a chat, a commit, or an
+`.agent/` file, and this one was already exposed once.
+
+Steps 4–12 additionally need three Telegram accounts (main admin, co-admin,
+stranger) and real Hyperliquid fills arriving live. An agent cannot supply those.
+
 ## NEXT EXACT ACTION
 
-Nothing offline. The next actions belong to the user (see USER-OWNED); after the
-token is rotated and the bot redeploys, run the §33 six-step live scenario for
-`0x31dea2516beee92135b96f464eeec3cf292a13f2` and record any payload shape that
-differs from `API_NOTES.md`.
+Waiting on the user for one decision: **which Railway project/service should host
+`CLEXER17/CLEXWHALE_BOT`** — a new service in the empty `devoted-unity`, a new
+service in `noble-creation` alongside the existing Postgres, or a deploy the user
+performs themselves in an account this CLI cannot see.
+
+Once a service exists with `BOT_TOKEN`, `MAIN_ADMIN_ID` and
+`DATABASE_URL = ${{Postgres.DATABASE_URL}}`:
+
+1. `railway logs --service <name> | tail -60` → confirm
+   `Database ......... CONNECTED (postgresql, durable)` and
+   `Configuration .... LOADED from database`, no reconnect loop, no
+   `Alert dropped: Telegram bot not attached yet`.
+2. Work through `.agent/LIVE_VERIFICATION.md` steps 4–12, filling the evidence
+   table. `NOT VERIFIED` is a valid answer; never record `PASS` without output.
 
 ## DO NOT START
 
-- **Persistence / settings work — COMPLETE and accepted (commit `6a0d677`).**
-- **Verified execution / position lifecycle — COMPLETE. Do not redo checkpoints 1–10.**
-- Do not create another Alembic migration. `0001_initial` + `0002_alert_thread_key`
-  are the migrations; the verified-execution work needed no schema change.
-- Do not add a UNIQUE constraint to `whale_events.dedup_key` — its absence is a
-  decision, so legitimate repeated position changes stay possible.
-- Do not redesign the settings system (key/value table is sufficient) or the
-  `bootstrapped_at` marker row.
-- Do not redo `.agent` memory or the Railway persistence implementation.
+- **Persistence / settings work — COMPLETE and accepted (`6a0d677`).**
+- **Verified execution / position lifecycle — COMPLETE (`d0194d7`). 587 passed.**
+- Do not redo checkpoints 1–10; do not redesign the architecture.
+- No new migration unless a real live failure proves one is required.
+- No UNIQUE constraint on `whale_events.dedup_key`.
+- Do not change working logic because it could be improved. This phase observes.
 - Never run `git reset --hard`, `git checkout .`, or `git clean -fd`.
-
-## BLOCKED BY
-
-Nothing.
 
 ## NOT VERIFIED
 
-Live Railway behaviour. Nothing in this milestone was observed against the
-deployed bot — no live alert, no live redeploy log.
+Everything live: startup, PostgreSQL durability, settings surviving a restart,
+BTC/ETH/SOL preserved when HYPE is added, threshold persistence, the Hyperliquid
+websocket, execution detection, position lifecycle, `/recent`, `/whales`, the
+order-alert toggle, main-admin/co-admin/normal-user permissions, and full wallet
+formatting on a real screen. No deployment was observed.
 
 ## USER-OWNED (not mine to do)
 
-Rotate the exposed `BOT_TOKEN` via @BotFather `/revoke`, update the Railway
-variable, confirm the redeploy log and a live alert.
+1. Confirm the exposed `BOT_TOKEN` was revoked via @BotFather `/revoke`.
+2. Create/point the Railway service and set its variables in the dashboard.
+3. Drive the Telegram steps from three accounts and capture the evidence.
