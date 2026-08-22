@@ -88,6 +88,30 @@ def identity_key(event: WhaleEvent) -> str:
             "t", int(event.event_time.timestamp()),
         )
 
+    if event.event_type is EventType.WHALE_LIQUIDATED:
+        # A liquidation is one fill, and ``tid`` identifies it. Its own namespace
+        # keeps it distinct from the ``trade`` key: the same fill can legitimately
+        # be seen on both the trades feed and a wallet's userEvents feed, and
+        # those are two different alerts about it, not a duplicate of one.
+        tid = event.context.get("tid")
+        if tid is not None:
+            return _digest("liquidation", tid)
+        digest_hash = event.context.get("hash")
+        if digest_hash:
+            return _digest("liquidation", "hash", digest_hash, event.coin)
+        # Neither identifier present: fall back to the immutable fill facts. The
+        # *liquidated* wallet is part of the key because it is read from
+        # ``liquidation.liquidatedUser``, not from enrichment.
+        return _digest(
+            "liquidation",
+            event.coin,
+            (event.wallet or "anon").lower(),
+            event.value("trade_side"),
+            "px", event.value("price"),
+            "sz", event.value("size"),
+            "t", int(event.event_time.timestamp()),
+        )
+
     if event.is_order_event:
         # ``oid`` is Hyperliquid's own order identifier: two events with the same
         # oid *and* the same lifecycle status are the same observation, however
@@ -147,6 +171,11 @@ def stable_side(event: WhaleEvent) -> str | None:
     """
     if event.event_type is EventType.WHALE_TRADE:
         return event.value("trade_side") or event.value("taker_side")
+    if event.event_type is EventType.WHALE_LIQUIDATED:
+        # ``side`` on a liquidation is the *position* side, which is present only
+        # when a snapshot backed it — so it can differ between two observations of
+        # the same forced close. The fill's own direction cannot.
+        return event.value("trade_side")
     return event.side
 
 

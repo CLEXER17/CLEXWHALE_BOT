@@ -136,6 +136,16 @@ POSITION_SIDES = frozenset({"LONG", "SHORT"})
 #: Side words that only ever belong to an order or a raw execution.
 ORDER_SIDES = frozenset({"BUY", "SELL"})
 
+#: Events that may never write position state, whatever data they happen to
+#: carry. Order events and aggregate book levels for the reasons in the module
+#: docstring; ``WHALE_LIQUIDATED`` because the only position snapshot available
+#: to it is the *pre-liquidation* one. Writing that would restore a position the
+#: exchange has just closed. The forced ``clearinghouseState`` refetch that
+#: follows a liquidation produces the real ``POSITION_CLOSED``.
+NEVER_MODIFY_POSITION = ORDER_EVENTS | frozenset(
+    {EventType.BOOK_LEVEL, EventType.WHALE_LIQUIDATED}
+)
+
 
 def order_status_of(event: WhaleEvent) -> OrderStatus | None:
     """The order-machine state this event represents, or ``None`` if it is not
@@ -179,13 +189,13 @@ def has_verified_position(event: WhaleEvent) -> bool:
 def may_modify_position(event: WhaleEvent) -> bool:
     """Whether this event is allowed to write position state.
 
-    Order events and aggregate book levels: never. Position-lifecycle events:
+    Anything in :data:`NEVER_MODIFY_POSITION`: never. Position-lifecycle events:
     always, because they are themselves the diff of two verified snapshots — and
     that includes ``POSITION_CLOSED``, which must be able to close the record
     even though the position it describes no longer exists. An executed trade:
     only when a verified position snapshot came with it.
     """
-    if event.event_type in ORDER_EVENTS or event.event_type is EventType.BOOK_LEVEL:
+    if event.event_type in NEVER_MODIFY_POSITION:
         return False
     if event.is_position_event:
         return True
@@ -194,6 +204,7 @@ def may_modify_position(event: WhaleEvent) -> bool:
 
 __all__ = [
     "LIVE_ORDER_STATES",
+    "NEVER_MODIFY_POSITION",
     "ORDER_SIDES",
     "ORDER_STATUS_OF_EVENT",
     "ORDER_TRANSITIONS",

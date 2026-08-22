@@ -268,6 +268,50 @@ def test_resting_orders_and_book_levels_are_exempt_from_the_margin_gate():
     assert make_filter().evaluate(book, cfg).accepted is True
 
 
+def test_a_liquidation_is_exempt_from_the_margin_gate():
+    """The margin is the thing that just ran out.
+
+    Hyperliquid reports no margin figure for the moment of a liquidation on any
+    feed, so an active margin gate would read "margin unknown" and reject every
+    forced close — turning the gate into an off switch for the one event it least
+    applies to.
+    """
+    cfg = config(min_margin_value=5_000_000)
+    liquidation = event(
+        event_type=EventType.WHALE_LIQUIDATED,
+        value_kind=ValueKind.LIQUIDATION_VALUE,
+        notional=5_700_000,
+        margin=None,
+    )
+    result = make_filter().evaluate(liquidation, cfg)
+    assert result.accepted is True
+    assert result.reason == REASON_OK
+
+
+def test_a_liquidation_is_measured_against_the_position_threshold():
+    cfg = config(min_whale_value=2_000_000, min_position_value=5_000_000)
+    liquidation = event(
+        event_type=EventType.WHALE_LIQUIDATED,
+        value_kind=ValueKind.LIQUIDATION_VALUE,
+        notional=3_000_000,
+    )
+    result = make_filter().evaluate(liquidation, cfg)
+    assert result.accepted is False
+    assert result.reason == REASON_THRESHOLD
+    assert result.threshold == 5_000_000
+
+
+def test_turning_position_alerts_off_also_silences_liquidations():
+    """A forced close is position news; no separate toggle exists for it."""
+    cfg = config(enable_position_detector=False)
+    liquidation = event(
+        event_type=EventType.WHALE_LIQUIDATED,
+        value_kind=ValueKind.LIQUIDATION_VALUE,
+        notional=5_700_000,
+    )
+    assert make_filter().evaluate(liquidation, cfg).reason == REASON_DETECTOR
+
+
 def test_the_threshold_is_applied_before_the_margin_gate():
     """A tiny trade is rejected for being tiny, not for its margin."""
     cfg = config(min_whale_value=2_000_000, min_margin_value=2_000_000)

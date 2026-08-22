@@ -33,7 +33,14 @@ from app.database.repository import EventRepository, PositionRepository, WalletR
 from app.hyperliquid import websocket as ws_module
 from app.whale.events import EventType, ValueKind
 from tests.conftest import MAIN_ADMIN_ID, FakeBot
-from tests.factories import BTC_PX, WALLET_A, WALLET_B, raw_trade
+from tests.factories import (
+    BTC_PX,
+    WALLET_A,
+    WALLET_B,
+    make_liquidation_fill,
+    raw_trade,
+    raw_user_events,
+)
 from tests.test_resilience import (
     META_AND_CTXS,
     FakeEndpoint,
@@ -112,6 +119,19 @@ BTC_TRIGGERS = [
 
 MISSING = object()  #: "Hyperliquid returned nothing for this wallet"
 
+#: The same account after the position is gone. Hyperliquid drops the entry from
+#: ``assetPositions`` entirely rather than reporting a zero size.
+BTC_FLAT = {
+    "marginSummary": {
+        "accountValue": "6200000.0",
+        "totalNtlPos": "0.0",
+        "totalMarginUsed": "0.0",
+    },
+    "withdrawable": "6200000.0",
+    "time": 1_700_000_100_000,
+    "assetPositions": [],
+}
+
 
 # ── doubles ────────────────────────────────────────────────────
 
@@ -185,6 +205,18 @@ class Wired:
         for payload in frames:
             await self.socket.push("trades", [payload])
         await wait_for(lambda: self.engine.trades_seen >= seen)
+        await self.engine._queue.join()
+        await self.container.alerts._queue.join()
+
+    async def user_events(self, wallet: str, payload: dict[str, Any]) -> None:
+        """Deliver a ``userEvents`` frame for one focus wallet.
+
+        The per-wallet socket is created by ``_apply_focus_slate`` on a refresh
+        timer, so the handler it would install is called directly. Everything
+        downstream — parser, queue, detector, filter, dedup, persistence,
+        formatter — is the production path.
+        """
+        await self.engine._on_user_message(wallet, "userEvents", payload)
         await self.engine._queue.join()
         await self.container.alerts._queue.join()
 
@@ -486,6 +518,87 @@ async def test_no_trigger_orders_means_no_tp_or_sl_value(wire):
     assert "not checked" not in text
 
 
+# ── TP/SL must actually be fetched when an alert needs it ──────
+#
+# Feature item 3. The levels above were already rendered correctly *given* a
+# trigger-order snapshot; the reported defect was that live alerts almost never
+# had one, so both lines read `N/A (not checked)`. Two gates in
+# ``WhaleEngine._enrich`` were the cause, and each has a test here plus one for
+# the reserve that must still hold.
+
+
+def leave_budget(stack, weight: float) -> None:
+    """Spend the weight window down until only ``weight`` is available."""
+    limiter = stack.container.rest.limiter
+    spend = limiter.available - weight
+    if spend > 0:
+        assert limiter.try_acquire(spend)
+    assert abs(limiter.available - weight) < 1.0
+
+
+async def test_tpsl_is_fetched_for_an_alert_even_in_a_busy_weight_minute(wire):
+    """Root cause 1: one reserve served two very different callers.
+
+    ``frontendOpenOrders`` costs 20 of a 1200/minute budget and was only spent
+    when more than 200 remained. That is the right bar for the background poll
+    loop trawling every tracked wallet, and the wrong one here: this trade has
+    already cleared the alert threshold, the message is about to be rendered, and
+    the trader's own TP/SL is the data a whale-watcher most wants. Under the wide
+    reserve a whale that arrived late in a busy minute was reported without it.
+    """
+    stack = await wire()
+    before = stack.http.types.count("frontendOpenOrders")
+    leave_budget(stack, 100.0)                       # under 200, comfortably over 20
+
+    await stack.trades(raw_trade(sz=50.0, tid=77_050))
+
+    assert stack.http.types.count("frontendOpenOrders") > before
+    text = stack.texts[0]
+    assert "🎯 <b>TP:</b> $115,000.00" in text
+    assert "🛑 <b>SL:</b> $88,000.00" in text
+    assert "not checked" not in text
+
+
+async def test_the_reserve_still_stops_the_fetch_when_the_budget_is_nearly_gone(wire):
+    """The relaxed reserve is not "no reserve".
+
+    Below it the call is skipped and the alert says `not checked` — the honest
+    answer. Spending the last of the window on a weight-20 nicety would starve
+    the weight-2 ``clearinghouseState`` and ``orderStatus`` calls that the rest
+    of the alert depends on.
+    """
+    stack = await wire()
+    before = stack.http.types.count("frontendOpenOrders")
+    leave_budget(stack, 30.0)                        # the call would fit; the reserve says no
+
+    await stack.trades(raw_trade(sz=50.0, tid=77_051))
+
+    assert stack.http.types.count("frontendOpenOrders") == before
+    text = stack.texts[0]
+    assert "🎯 <b>TP:</b> N/A (not checked)" in text
+    assert "🛑 <b>SL:</b> N/A (not checked)" in text
+
+
+async def test_tpsl_is_still_fetched_with_the_order_detector_switched_off(wire, container):
+    """Root cause 2: one flag governed two responsibilities.
+
+    ``enable_order_detector`` means "alert me about large resting orders". It was
+    also the gate on the only request that reveals TP/SL, so switching off
+    order *alerts* silently switched off TP/SL on every position alert too. The
+    fetch is now made for an alert regardless; emission still respects the flag.
+    """
+    await container.settings.set_value("enable_order_detector", False, MAIN_ADMIN_ID)
+    stack = await wire()
+    await stack.trades(raw_trade(sz=50.0, tid=77_052))
+
+    text = stack.texts[0]
+    assert "🎯 <b>TP:</b> $115,000.00" in text
+    assert "🛑 <b>SL:</b> $88,000.00" in text
+    # …and no resting-order alert appeared from the detector the admin disabled.
+    assert len(stack.bot.messages) == 1
+    assert "LIMIT" not in text
+
+
 async def test_a_missing_liquidation_price_is_reported_as_na(wire):
     no_liq = json.loads(json.dumps(BTC_LONG))
     no_liq["assetPositions"][0]["position"]["liquidationPx"] = None
@@ -523,6 +636,127 @@ async def test_an_unattributed_trade_never_invents_a_wallet(wire, database):
         events = await EventRepository.recent(session, limit=5)
         assert len(events) == 1
         assert events[0].wallet is None
+
+
+# ── forced liquidations (feature item 5) ───────────────────────
+#
+# A liquidation reaches us only as a ``userEvents`` fill carrying a
+# ``liquidation`` object — there is no public global liquidation feed
+# (`.agent/API_NOTES.md` §5). These tests drive that frame through the real
+# pipeline and assert on the Telegram text and the rows written.
+
+async def test_a_liquidation_frame_becomes_a_liquidation_alert(wire):
+    stack = await wire()
+    # The wallet is known first, so the pre-liquidation snapshot exists.
+    await stack.trades(raw_trade(sz=50.0, users=[WALLET_A, WALLET_B], tid=77_050))
+    stack.bot.messages.clear()
+
+    fill = make_liquidation_fill(px=95_000.0, sz=60.0, side="A", tid=88_001)
+    await stack.user_events(WALLET_A, raw_user_events([fill]))
+
+    assert len(stack.bot.messages) >= 1
+    text = stack.texts[0]
+    assert text.startswith("💥 WHALE LIQUIDATED")
+    assert "🪙 <b>BTC</b>" in text
+    assert "💥 <b>Liquidated value:</b> $5,700,000" in text
+    assert "💵 <b>Fill price:</b> $95,000.00" in text
+    assert "📦 <b>Size:</b> 60 BTC" in text
+    assert "📊 <b>Mark at liquidation:</b> $95,010.00" in text
+    assert f"<code>{WALLET_A.lower()}</code>" in text
+    # The side came from the snapshot taken before the forced close.
+    assert "📈 LONG liquidated" in text
+    # Never inferred from the SELL that executed it; both appear, labelled.
+    assert "🔀 <b>Fill direction:</b> SELL" in text
+
+
+async def test_a_liquidation_never_reports_leverage_or_margin(wire):
+    """Hyperliquid publishes neither for the moment of liquidation."""
+    stack = await wire()
+    await stack.trades(raw_trade(sz=50.0, users=[WALLET_A, WALLET_B], tid=77_051))
+    stack.bot.messages.clear()
+
+    await stack.user_events(
+        WALLET_A, raw_user_events([make_liquidation_fill(tid=88_002)])
+    )
+
+    text = stack.texts[0]
+    assert "⚡ <b>Leverage:</b>" not in text
+    assert "🏦 <b>Margin:</b>" not in text
+    assert "Leverage and margin at liquidation are not reported by Hyperliquid" in text
+
+
+async def test_a_liquidation_writes_an_event_row_but_no_position_row(wire, database):
+    """The only snapshot it holds is the pre-liquidation one; writing it would
+    restore a position the exchange has just closed."""
+    stack = await wire()
+    await stack.user_events(
+        WALLET_A, raw_user_events([make_liquidation_fill(tid=88_003)])
+    )
+
+    async with database.session() as session:
+        events = await EventRepository.recent(session, limit=5)
+        assert [row.event_type for row in events] == [EventType.WHALE_LIQUIDATED.value]
+        assert events[0].value_kind == ValueKind.LIQUIDATION_VALUE.value
+        assert events[0].wallet == WALLET_A.lower()
+        assert await PositionRepository.get(session, WALLET_A, "BTC") is None
+
+
+async def test_the_same_liquidation_delivered_twice_alerts_once(wire):
+    stack = await wire()
+    frame = raw_user_events([make_liquidation_fill(tid=88_004)])
+    await stack.user_events(WALLET_A, frame)
+    await stack.user_events(WALLET_A, frame)
+
+    assert len(stack.bot.messages) == 1
+
+
+async def test_a_liquidation_on_the_other_side_is_attributed_to_the_liquidated_wallet(wire):
+    """A ``liquidation`` object on A's feed does not mean A was liquidated."""
+    stack = await wire()
+    fill = make_liquidation_fill(liquidated_user=WALLET_B, tid=88_005)
+    await stack.user_events(WALLET_A, raw_user_events([fill]))
+
+    text = stack.texts[0]
+    assert f"👤 <b>Trader:</b> <code>{WALLET_B.lower()}</code>" in text
+    assert f"<code>{WALLET_A.lower()}</code> (counterparty fill)" in text
+    # closedPnl on that fill is A's result, not B's loss.
+    assert "⚪ <b>Realized PnL:</b> N/A" in text
+
+
+async def test_the_forced_refetch_still_produces_the_real_position_close(wire, database):
+    """Two facts, two alerts: the exchange forced a close, and the book is flat."""
+    stack = await wire()
+    await stack.trades(raw_trade(sz=50.0, users=[WALLET_A, WALLET_B], tid=77_052))
+    stack.bot.messages.clear()
+    stack.http.account = BTC_FLAT           # the position is gone from now on
+
+    await stack.user_events(
+        WALLET_A, raw_user_events([make_liquidation_fill(tid=88_006)])
+    )
+
+    headers = [text.splitlines()[0] for text in stack.texts]
+    assert headers == ["💥 WHALE LIQUIDATED", "🐋 WHALE POSITION CLOSED"]
+    async with database.session() as session:
+        position = await PositionRepository.get(session, WALLET_A, "BTC")
+        assert position is not None and position.is_open is False
+
+
+async def test_a_liquidation_below_the_position_threshold_is_not_alerted(wire):
+    stack = await wire()
+    await stack.user_events(
+        WALLET_A, raw_user_events([make_liquidation_fill(px=95_000.0, sz=1.0, tid=88_007)])
+    )
+
+    assert stack.bot.messages == []
+
+
+async def test_a_plain_fill_without_a_liquidation_object_is_not_a_liquidation(wire):
+    from tests.factories import make_fill
+
+    stack = await wire()
+    await stack.user_events(WALLET_A, raw_user_events([make_fill(tid=88_008)]))
+
+    assert [text for text in stack.texts if "LIQUIDATED" in text] == []
 
 
 # ── malformed input must not reach an alert ────────────────────

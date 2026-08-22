@@ -15,6 +15,7 @@ from typing import Any
 from app.hyperliquid.models import (
     AccountState,
     BookLevel,
+    Fill,
     L2Book,
     OpenOrder,
     OrderUpdate,
@@ -144,6 +145,89 @@ def make_context(
         first_seen=first_seen,
         orders_known=orders_known,
     )
+
+
+# ── fills / liquidations ───────────────────────────────────────
+
+def make_fill(
+    *,
+    coin: str = "BTC",
+    px: float = 95_000.0,
+    sz: float = 60.0,
+    side: str = "A",
+    dir: str | None = "Close Long",
+    closed_pnl: float | None = -180_000.0,
+    start_position: float | None = 60.0,
+    tid: int | None = None,
+    oid: int | None = None,
+    liquidation: dict[str, Any] | None = None,
+    when: datetime | None = None,
+) -> Fill:
+    """One fill from a per-wallet feed. ``side`` is ``"B"``/``"A"`` as sent."""
+    return Fill(
+        coin=coin,
+        px=px,
+        sz=sz,
+        side=side,
+        time=when or now(),
+        oid=oid if oid is not None else next(_oids),
+        tid=tid if tid is not None else next(_tids),
+        hash="0x" + "ef" * 32,
+        dir=dir,
+        closed_pnl=closed_pnl,
+        start_position=start_position,
+        crossed=True,
+        fee=120.0,
+        liquidation=liquidation,
+    )
+
+
+def make_liquidation_fill(
+    *,
+    liquidated_user: str | None = None,
+    mark_px: float | None = 95_010.0,
+    method: str | None = "market",
+    **kwargs: Any,
+) -> Fill:
+    """A fill carrying Hyperliquid's ``liquidation`` object.
+
+    ``liquidated_user`` is the wallet the exchange names as the liquidated party.
+    Left unset the object omits the field, which is the case where the only
+    candidate is the wallet whose feed delivered the fill.
+    """
+    detail: dict[str, Any] = {}
+    if liquidated_user is not None:
+        detail["liquidatedUser"] = liquidated_user
+    if mark_px is not None:
+        detail["markPx"] = mark_px
+    if method is not None:
+        detail["method"] = method
+    return make_fill(liquidation=detail, **kwargs)
+
+
+def raw_user_events(fills: list[Fill]) -> dict[str, Any]:
+    """The ``userEvents`` frame shape, built back from :class:`Fill` objects."""
+    return {
+        "fills": [
+            {
+                "coin": fill.coin,
+                "px": str(fill.px),
+                "sz": str(fill.sz),
+                "side": fill.side,
+                "time": int((fill.time or now()).timestamp() * 1000),
+                "oid": fill.oid,
+                "tid": fill.tid,
+                "hash": fill.hash,
+                "dir": fill.dir,
+                "closedPnl": None if fill.closed_pnl is None else str(fill.closed_pnl),
+                "startPosition": None if fill.start_position is None else str(fill.start_position),
+                "crossed": fill.crossed,
+                "fee": None if fill.fee is None else str(fill.fee),
+                **({"liquidation": fill.liquidation} if fill.liquidation is not None else {}),
+            }
+            for fill in fills
+        ]
+    }
 
 
 # ── orders ─────────────────────────────────────────────────────

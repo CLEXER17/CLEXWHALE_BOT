@@ -78,6 +78,7 @@ THREAD_MAX = 2000
 #: signal format; lifecycle changes get their own headline.
 HEADERS: dict[EventType, str] = {
     EventType.WHALE_TRADE: "🐋 HYPERLIQUID WHALE ALERT",
+    EventType.WHALE_LIQUIDATED: "💥 WHALE LIQUIDATED",
     EventType.POSITION_OPENED: "🐋 HYPERLIQUID WHALE ALERT",
     EventType.POSITION_INCREASED: "🐋 WHALE POSITION INCREASED",
     EventType.POSITION_DECREASED: "🐋 WHALE POSITION REDUCED",
@@ -277,9 +278,91 @@ class AlertService:
     def render(self, event: WhaleEvent) -> str:
         if event.event_type is EventType.BOOK_LEVEL:
             return self._render_book(event)
+        if event.event_type is EventType.WHALE_LIQUIDATED:
+            return self._render_liquidation(event)
         if event.is_order_event:
             return self._render_order(event)
         return self._render_position(event)
+
+    # -- forced liquidations --
+    def _render_liquidation(self, event: WhaleEvent) -> str:
+        """A position the exchange closed, rendered from the fill only.
+
+        Everything printed here comes from the liquidation fill itself. The
+        position that was liquidated no longer exists, so entry price, leverage,
+        margin and TP/SL are *not* reconstructed from the last snapshot we
+        happened to hold — one line says they are not reported instead
+        (`.agent/API_NOTES.md` §5). The side is the exception, and only because
+        it is taken from a verified source that is named in the alert.
+        """
+        coin = escape_html(event.coin)
+        lines = [
+            HEADERS[EventType.WHALE_LIQUIDATED],
+            DIVIDER,
+            f"🪙 <b>{coin}</b>",
+            self._liquidated_side_line(event),
+            f"💥 <b>Liquidated value:</b> {fmt_usd_full(event.notional)}",
+        ]
+
+        price = event.point("price")
+        lines.append(
+            f"💵 <b>Fill price:</b> {fmt_price(price.value)}{marker(price)}"
+            if price.available
+            else "💵 <b>Fill price:</b> N/A"
+        )
+
+        size = event.point("size")
+        if size.available:
+            lines.append(f"📦 <b>Size:</b> {fmt_size(size.value)} {coin}")
+
+        mark = event.point("liquidation_mark_px")
+        if mark.available:
+            lines.append(f"📊 <b>Mark at liquidation:</b> {fmt_price(mark.value)}{marker(mark)}")
+
+        method = event.point("liquidation_method")
+        if method.available:
+            lines.append(f"🏷 <b>Method:</b> {escape_html(str(method.value))}")
+
+        # The execution direction, labelled as such. A BUY here closed a short;
+        # it is not itself a position side, so the two never share a line.
+        trade_side = event.point("trade_side")
+        if trade_side.available:
+            lines.append(f"🔀 <b>Fill direction:</b> {escape_html(str(trade_side.value))}")
+
+        realized = event.point("realized_pnl")
+        if realized.available:
+            emoji = "🟢" if float(realized.value) >= 0 else "🔴"
+            lines.append(
+                f"{emoji} <b>Realized PnL:</b> {fmt_usd(realized.value)}{marker(realized)}"
+            )
+        else:
+            reason = _short_reason(realized.note)
+            lines.append(
+                f"⚪ <b>Realized PnL:</b> N/A — {escape_html(reason)}"
+                if reason
+                else "⚪ <b>Realized PnL:</b> N/A"
+            )
+
+        # Hyperliquid reports no leverage or margin figure for the moment of a
+        # liquidation on any public feed, and the pre-liquidation snapshot is not
+        # that moment. Saying so beats printing a number from seconds earlier.
+        lines.append("ℹ️ Leverage and margin at liquidation are not reported by Hyperliquid")
+
+        counterparty = event.context.get("counterparty")
+        if counterparty:
+            # The subscribed wallet was on the other side, not the liquidated one.
+            lines.append(
+                "🔗 <b>Seen via:</b> <code>"
+                f"{escape_html(str(counterparty).lower())}</code> (counterparty fill)"
+            )
+
+        lines.append(DIVIDER)
+        lines.append(self._trader_line(event))
+        lines.append(self._time_line(event))
+        lines.append(f"🔎 <b>Detection:</b> {escape_html(self._detection_label(event))}")
+        lines.append(DIVIDER)
+        lines.append(FOOTER)
+        return "\n".join(lines)
 
     # -- position / trade signals (spec §16) --
     def _render_position(self, event: WhaleEvent) -> str:
@@ -517,6 +600,26 @@ class AlertService:
         if badge:
             return badge
         return f"↔️ {escape_html(side)}" if side else "↔️ direction N/A"
+
+    def _liquidated_side_line(self, event: WhaleEvent) -> str:
+        """The side of the position that was force-closed, or nothing claimed.
+
+        Only a verified source may fill this in (see
+        :meth:`app.whale.detector.WhaleDetector._liquidated_side`). When none was
+        available the line says the side is unknown rather than deriving it from
+        the fill's BUY/SELL direction, which would be the order/position mistake.
+        """
+        point = event.point("liquidated_side")
+        side = str(point.value).upper() if point.available else ""
+        badge = SIDE_BADGES.get(side)
+        if badge:
+            return f"{badge} liquidated"
+        reason = _short_reason(point.note)
+        return (
+            f"↔️ <b>Liquidated side:</b> N/A — {escape_html(reason)}"
+            if reason
+            else "↔️ <b>Liquidated side:</b> N/A"
+        )
 
     def _order_side_line(self, event: WhaleEvent) -> str:
         """``🟢 BUY LIMIT`` / ``🔴 SELL LIMIT`` — never LONG or SHORT.

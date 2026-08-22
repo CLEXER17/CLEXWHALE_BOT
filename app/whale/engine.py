@@ -81,6 +81,19 @@ MAX_FOCUS_WALLETS = min(WS_UNIQUE_USER_HARD_CAP, MAX_WS_CONNECTIONS - 2)
 #: Cap on the pending realised-PnL map (wallet+coin → summed ``closedPnl``).
 REALIZED_PNL_MAX = 500
 
+#: Weight that must be left in the sliding window before an *opportunistic*
+#: ``frontendOpenOrders`` (weight 20) is worth spending. Routine polling keeps a
+#: wide reserve so a burst of weight-2 position polls is never starved by it.
+ORDER_POLL_RESERVE = 200.0
+
+#: The reserve when that same call backs an alert being rendered right now. It is
+#: the only public source of the trader's own TP/SL levels, so the bar here is
+#: "the call fits, with room for the weight-2 follow-ups in the same cycle"
+#: rather than "there is plenty of slack". Under the wide reserve, a whale alert
+#: that happened to arrive during a busy minute printed `N/A (not checked)` for
+#: TP and SL — data Hyperliquid would have given us for 20 of a 1200 budget.
+ALERT_ORDER_POLL_RESERVE = 60.0
+
 
 @dataclass(slots=True)
 class _Job:
@@ -429,7 +442,11 @@ class WhaleEngine:
     async def _process_trade(self, trade: Trade) -> None:
         wallet = trade.taker or trade.buyer or trade.seller
         if wallet:
-            await self._enrich(wallet, trade.coin)
+            # Every trade that reaches here has already cleared the alert
+            # threshold in ``_on_trade``, so this enrichment is what the alert
+            # will be rendered from — worth the weight-20 trigger-order fetch
+            # that populates TP/SL.
+            await self._enrich(wallet, trade.coin, for_alert=True)
         context = self.tracker.context_for(wallet, trade.coin) if wallet else None
         event = self.detector.from_trade(trade, wallet=wallet, context=context)
         if event is not None:
@@ -465,14 +482,42 @@ class WhaleEngine:
 
     async def _process_liquidation(self, wallet: str, fill: Any) -> None:
         """A liquidation fill for a focus wallet. Hyperliquid exposes liquidation
-        detail only on per-user feeds, so this covers the focus slate only."""
+        detail only on per-user feeds, so this covers the focus slate only.
+
+        Order of operations matters. The snapshot is read **before** the forced
+        refetch, because the refetch is what replaces the liquidated position with
+        a flat one — after it, the only thing that could tell us which side was
+        closed is gone. The event is emitted from that pre-liquidation snapshot,
+        and then the refetch runs so the normal snapshot diff produces the real
+        ``POSITION_CLOSED``. Two alerts, two different facts: the exchange forced
+        a close, and the position is now flat.
+        """
+        context = self.tracker.context_for(wallet, fill.coin) if wallet else None
+        event = self.detector.from_liquidation(
+            wallet,
+            fill,
+            context=context,
+            min_notional=self.config.threshold_for("position"),
+        )
+        if event is not None:
+            await self._emit(event)
         await self._enrich(wallet, fill.coin, force=True)
 
     # ── enrichment ────────────────────────────────────────────
-    async def _enrich(self, wallet: str, coin: str, *, force: bool = False) -> None:
-        """Fetch what we can afford about a wallet, without blocking on budget."""
+    async def _enrich(
+        self, wallet: str, coin: str, *, force: bool = False, for_alert: bool = False
+    ) -> None:
+        """Fetch what we can afford about a wallet, without blocking on budget.
+
+        ``force`` ignores the poll intervals — the caller has evidence the state
+        just changed. ``for_alert`` says an alert for this wallet is being built
+        right now, which changes only how much weight we are willing to spend:
+        the poll intervals still apply, because a cached snapshot seconds old is
+        just as good and the alert should not pay for a re-fetch.
+        """
         tracked = self.tracker.get(wallet)
         now = utc_now()
+        backs_alert = force or for_alert
 
         position_age = (
             (now - tracked.positions_at).total_seconds()
@@ -486,16 +531,23 @@ class WhaleEngine:
             else:
                 self.tracker.record_failure(wallet, backoff=30.0)
 
-        if not self.config.enable_order_detector:
+        # ``frontendOpenOrders`` serves two responsibilities and only one of them
+        # is order *detection*: it is also the sole source of the TP/SL levels a
+        # position alert prints. Conflating the two meant a user who turned the
+        # order detector off (they did not want resting-order alerts) also lost
+        # TP/SL on every whale alert. So the fetch is still made when it backs an
+        # alert; ``_ingest_open_orders`` re-checks the flag before emitting, so no
+        # order event appears from a disabled detector.
+        if not self.config.enable_order_detector and not backs_alert:
             return
         order_age = (
             (now - tracked.orders_at).total_seconds()
             if tracked is not None and tracked.orders_at is not None
             else None
         )
-        # frontendOpenOrders costs 20 weight; only spend it when there is slack.
+        reserve = ALERT_ORDER_POLL_RESERVE if backs_alert else ORDER_POLL_RESERVE
         if (force or order_age is None or order_age > self.env.order_poll_interval) and (
-            self.rest.limiter.available > 200
+            self.rest.limiter.available > reserve
         ):
             orders = await self.rest.frontend_open_orders(wallet, wait_for_budget=False)
             if orders is not None:

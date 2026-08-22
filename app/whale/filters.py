@@ -21,6 +21,10 @@ from app.whale.events import CANCEL_EVENTS, ORDER_EVENTS, EventType, WhaleEvent
 
 DETECTOR_OF_EVENT = {
     EventType.WHALE_TRADE: "trade",
+    # A liquidation is position news, so the position detector governs it: an
+    # admin who turned position alerts off is not asking to still be told about
+    # forced closes. No new toggle is added for one event type.
+    EventType.WHALE_LIQUIDATED: "position",
     EventType.POSITION_OPENED: "position",
     EventType.POSITION_INCREASED: "position",
     EventType.POSITION_DECREASED: "position",
@@ -48,7 +52,16 @@ REASON_MARGIN_UNKNOWN = "margin_unknown"
 #: exists for them: an aggregate book level has no wallet at all, and a resting
 #: order commits no collateral until it fills. Gating these would silence whole
 #: detectors for a reason that has nothing to do with the admin's intent.
-MARGIN_EXEMPT_EVENTS = frozenset({EventType.BOOK_LEVEL}) | ORDER_EVENTS
+#:
+#: A liquidation is exempt for a sharper reason. The margin *is* the thing that
+#: just ran out, and Hyperliquid does not report the wallet's margin at the
+#: moment of liquidation on any feed (`.agent/API_NOTES.md` §5). So the gate
+#: would read "margin unknown" and reject every liquidation — turning the margin
+#: filter into an off switch for the one event it least applies to.
+MARGIN_EXEMPT_EVENTS = (
+    frozenset({EventType.BOOK_LEVEL, EventType.WHALE_LIQUIDATED}) | ORDER_EVENTS
+)
+
 
 
 @dataclass(frozen=True)

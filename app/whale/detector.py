@@ -43,7 +43,7 @@ from app.hyperliquid.constants import (
     side_label,
     status_label,
 )
-from app.hyperliquid.models import L2Book, OpenOrder, OrderUpdate, Position, Trade
+from app.hyperliquid.models import Fill, L2Book, OpenOrder, OrderUpdate, Position, Trade
 from app.utils.formatting import DataPoint, pct_distance, utc_now
 from app.whale.events import EventType, ValueKind, WhaleEvent
 
@@ -95,6 +95,40 @@ def _flatten(orders: Sequence[OpenOrder]) -> list[OpenOrder]:
         if order.children:
             out.extend(_flatten(order.children))
     return out
+
+
+#: Words in a fill's ``dir`` string that mean "this fill reduced or removed an
+#: existing position", which is the only case where ``dir`` names a side we can
+#: report as the side that was liquidated.
+_CLOSING_WORDS = ("close", "liquidat", ">")
+
+
+def _stated_direction(dir_text: str | None) -> str | None:
+    """The position side Hyperliquid spells out in a fill's ``dir``, or ``None``.
+
+    ``dir`` is free-form English — ``"Close Long"``, ``"Long > Short"``,
+    ``"Open Short"``, ``"Buy"`` — so it is read conservatively:
+
+    * Only a *closing* description counts. ``"Open Long"`` names a side, but the
+      side of a position being created, which is no evidence about what was
+      force-closed.
+    * On a flip such as ``"Long > Short"`` the first side named is the one being
+      closed, so the earliest mention wins.
+    * ``"Buy"``/``"Sell"`` name an execution direction, not a position side, and
+      are deliberately not translated. That is the whole order/position rule.
+    """
+    if not dir_text:
+        return None
+    text = dir_text.lower()
+    if not any(word in text for word in _CLOSING_WORDS):
+        return None
+    long_at = text.find("long")
+    short_at = text.find("short")
+    if long_at < 0 and short_at < 0:
+        return None
+    if short_at < 0 or (long_at >= 0 and long_at < short_at):
+        return "LONG"
+    return "SHORT"
 
 
 def extract_tpsl(
@@ -311,7 +345,141 @@ class WhaleDetector:
         self._attach_market(event, trade.px)
         return event
 
-    # ── 2. position lifecycle ─────────────────────────────────
+    # ── 2. forced liquidation ─────────────────────────────────
+    def from_liquidation(
+        self,
+        subscribed_wallet: str,
+        fill: Fill,
+        *,
+        context: PositionContext | None = None,
+        min_notional: float = 0.0,
+    ) -> WhaleEvent | None:
+        """A liquidation the exchange reported on a per-wallet fills feed.
+
+        ``fill.liquidation`` is the only public evidence that a liquidation
+        happened at all: there is no global liquidations feed, so this covers the
+        focus slate only (`.agent/API_NOTES.md` §5).
+
+        Two things are easy to get wrong here and are handled explicitly.
+
+        **Who was liquidated.** A fill on ``subscribed_wallet``'s feed carrying a
+        ``liquidation`` object does *not* mean that wallet was the one liquidated
+        — it may have been on the other side of someone else's forced close.
+        Hyperliquid names the liquidated party in ``liquidation.liquidatedUser``,
+        so when that field is present it *is* the subject, and the subscribed
+        wallet becomes the counterparty. Position context is attached only when
+        the two are the same wallet; otherwise we hold no snapshot of the party
+        this event is about, and inventing one is not an option.
+
+        **Which side was closed.** Never inferred from the fill's buy/sell
+        direction: a BUY closes a short and also opens a long, and the point of
+        the order/position separation is that an execution side is not a position
+        side. Only three sources count, in order — the last verified
+        ``clearinghouseState`` snapshot, the sign of ``startPosition`` (the feed's
+        own report of the position size before the fill), and ``dir`` when
+        Hyperliquid spells the direction out. With none of them the side is left
+        unavailable and the alert prints no side badge.
+        """
+        notional = fill.notional
+        if notional < min_notional:
+            return None
+        detail = fill.liquidation or {}
+        if not isinstance(detail, dict):
+            detail = {}
+
+        liquidated_user = detail.get("liquidatedUser")
+        subject = (
+            str(liquidated_user).lower()
+            if isinstance(liquidated_user, str) and liquidated_user
+            else subscribed_wallet
+        )
+        own = subject.lower() == (subscribed_wallet or "").lower()
+        ctx = (context or PositionContext()) if own else PositionContext()
+
+        side, side_source = self._liquidated_side(ctx, fill)
+        event = WhaleEvent(
+            event_type=EventType.WHALE_LIQUIDATED,
+            coin=fill.coin,
+            notional=notional,
+            value_kind=ValueKind.LIQUIDATION_VALUE,
+            event_time=fill.time or utc_now(),
+            side=side,
+            wallet=subject,
+            detection="Forced liquidation",
+            context={
+                "tid": fill.tid,
+                "hash": fill.hash,
+                "oid": fill.oid,
+                "source": "ws:userEvents",
+                "subscribed_wallet": subscribed_wallet,
+                # Set only when the subscribed wallet was *not* the liquidated
+                # party, so an audit can tell the two roles apart later.
+                "counterparty": None if own else subscribed_wallet,
+            },
+        )
+        event.set("price", DataPoint.confirmed(fill.px, "liquidation fill price"))
+        event.set("size", DataPoint.confirmed(abs(fill.sz)))
+        # The fill's own direction, kept as an order-side word so nothing
+        # downstream can mistake it for the position side.
+        event.set("trade_side", DataPoint.confirmed(side_label(fill.side)))
+        if side is not None:
+            event.set("liquidated_side", DataPoint.confirmed(side, side_source))
+        else:
+            event.set(
+                "liquidated_side",
+                DataPoint.unavailable("no verified position side for this liquidation"),
+            )
+
+        mark_px = detail.get("markPx")
+        event.set(
+            "liquidation_mark_px",
+            DataPoint.confirmed(float(mark_px), "mark price at liquidation")
+            if isinstance(mark_px, (int, float))
+            else DataPoint.unavailable("not reported on this liquidation"),
+        )
+        method = detail.get("method")
+        event.set(
+            "liquidation_method",
+            DataPoint.confirmed(str(method))
+            if isinstance(method, str) and method
+            else DataPoint.unavailable("not reported on this liquidation"),
+        )
+
+        # ``closedPnl`` is the subscribed wallet's realised result on *its* fill.
+        # It is only the liquidated party's loss when those are the same wallet.
+        if own and fill.closed_pnl is not None:
+            event.set(
+                "realized_pnl",
+                DataPoint.confirmed(fill.closed_pnl, "closedPnl on the liquidation fill"),
+            )
+        else:
+            event.set(
+                "realized_pnl",
+                DataPoint.unavailable(
+                    "closedPnl belongs to the counterparty, not the liquidated wallet"
+                    if not own
+                    else "not reported on this fill"
+                ),
+            )
+
+        self._attach_market(event, fill.px)
+        return event
+
+    @staticmethod
+    def _liquidated_side(ctx: PositionContext, fill: Fill) -> tuple[str | None, str]:
+        """The side of the position that was closed, and where that came from."""
+        if ctx.position is not None and ctx.position.side in {"LONG", "SHORT"}:
+            return ctx.position.side, "last verified position snapshot"
+        start = fill.start_position
+        if start is not None and abs(start) > DUST:
+            side = "LONG" if start > 0 else "SHORT"
+            return side, "sign of startPosition on the liquidation fill"
+        stated = _stated_direction(fill.dir)
+        if stated is not None:
+            return stated, "direction stated by Hyperliquid on the fill"
+        return None, ""
+
+    # ── 3. position lifecycle ─────────────────────────────────
     def from_position_change(
         self,
         wallet: str,

@@ -214,6 +214,67 @@ def test_stats_snapshot_shape():
     assert snapshot["identity_cached"] >= 1
 
 
+def liquidation_event(
+    *, tid: int | None = 4242, wallet: str = WALLET_A, side: str | None = "LONG"
+) -> WhaleEvent:
+    event = WhaleEvent(
+        event_type=EventType.WHALE_LIQUIDATED,
+        coin="BTC",
+        notional=5_700_000.0,
+        value_kind=ValueKind.LIQUIDATION_VALUE,
+        side=side,
+        wallet=wallet,
+        detection="Forced liquidation",
+        context={"tid": tid, "hash": "0x" + "ef" * 32},
+    )
+    event.set("price", DataPoint.confirmed(95_000.0))
+    event.set("size", DataPoint.confirmed(60.0))
+    event.set("trade_side", DataPoint.confirmed("SELL"))
+    return event
+
+
+def test_the_same_liquidation_fill_is_suppressed():
+    dedup = Deduplicator()
+    assert dedup.check(liquidation_event(), cooldown_seconds=0) is True
+    assert dedup.check(liquidation_event(), cooldown_seconds=0) is False
+
+
+def test_two_separate_liquidations_of_one_wallet_both_pass():
+    """Same wallet, same coin, same size — different fills."""
+    dedup = Deduplicator()
+    assert dedup.check(liquidation_event(tid=1), cooldown_seconds=0) is True
+    assert dedup.check(liquidation_event(tid=2), cooldown_seconds=0) is True
+
+
+def test_a_liquidation_and_a_trade_sharing_a_tid_do_not_collide():
+    """One fill can appear on both feeds; those are two different alerts."""
+    assert identity_key(liquidation_event(tid=99)) != identity_key(trade_event(tid=99))
+
+
+def test_a_liquidation_identity_survives_a_side_that_arrives_later():
+    """The side depends on whether a snapshot backed it, so it cannot be in the key."""
+    assert identity_key(liquidation_event(side="LONG")) == identity_key(
+        liquidation_event(side=None)
+    )
+
+
+def test_a_liquidation_without_a_tid_falls_back_to_the_fill_hash():
+    first = liquidation_event(tid=None)
+    second = liquidation_event(tid=None)
+    assert identity_key(first) == identity_key(second)
+    other = liquidation_event(tid=None)
+    other.context["hash"] = "0x" + "ab" * 32
+    assert identity_key(other) != identity_key(first)
+
+
+def test_the_liquidated_wallet_is_part_of_an_identifierless_key():
+    first = liquidation_event(tid=None, wallet=WALLET_A)
+    first.context["hash"] = None
+    second = liquidation_event(tid=None, wallet="0x" + "22" * 20)
+    second.context["hash"] = None
+    assert identity_key(first) != identity_key(second)
+
+
 def test_anonymous_book_events_do_not_collide_with_wallet_events():
     book = WhaleEvent(
         event_type=EventType.BOOK_LEVEL,

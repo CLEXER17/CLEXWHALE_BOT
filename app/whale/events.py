@@ -30,6 +30,12 @@ from app.utils.formatting import Confidence, DataPoint, utc_now
 class EventType(str, Enum):
     #: Large executed trade (taker crossed the book) seen on the trades feed.
     WHALE_TRADE = "WHALE_TRADE"
+    #: A position force-closed by the exchange. Deliberately *not* a member of
+    #: :data:`POSITION_EVENTS`: it is an execution the exchange reported, not the
+    #: diff of two verified snapshots, so it must not write position state. The
+    #: ``clearinghouseState`` refetch that follows it emits the real
+    #: ``POSITION_CLOSED`` (see :func:`app.whale.lifecycle.may_modify_position`).
+    WHALE_LIQUIDATED = "WHALE_LIQUIDATED"
     POSITION_OPENED = "POSITION_OPENED"
     POSITION_INCREASED = "POSITION_INCREASED"
     POSITION_DECREASED = "POSITION_DECREASED"
@@ -74,6 +80,9 @@ class ValueKind(str, Enum):
     ORDER_NOTIONAL = "ORDER_NOTIONAL"
     MARGIN = "MARGIN"
     BOOK_LEVEL_NOTIONAL = "BOOK_LEVEL_NOTIONAL"
+    #: The USD value the exchange force-closed: the liquidation fill's own
+    #: ``px * sz``. Not a discretionary trade and not a snapshot notional.
+    LIQUIDATION_VALUE = "LIQUIDATION_VALUE"
 
 
 VALUE_KIND_LABELS = {
@@ -83,7 +92,9 @@ VALUE_KIND_LABELS = {
     ValueKind.ORDER_NOTIONAL: "Resting order notional",
     ValueKind.MARGIN: "Margin committed",
     ValueKind.BOOK_LEVEL_NOTIONAL: "Aggregate book level",
+    ValueKind.LIQUIDATION_VALUE: "Liquidated position value",
 }
+
 
 
 class Side(str, Enum):
@@ -101,6 +112,11 @@ THRESHOLD_CLASS = {
     ValueKind.ORDER_NOTIONAL: "order",
     ValueKind.MARGIN: "position",
     ValueKind.BOOK_LEVEL_NOTIONAL: "order",
+    # A liquidation is position news, not trade news: the figure is the value of
+    # a position the exchange closed, so it is measured against the *position*
+    # threshold. No fifth threshold class is introduced — an administrator who
+    # set "positions over $5M" already said what size of position interests them.
+    ValueKind.LIQUIDATION_VALUE: "position",
 }
 
 
