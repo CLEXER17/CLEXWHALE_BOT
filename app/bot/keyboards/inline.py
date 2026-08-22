@@ -356,11 +356,19 @@ def confirm_reset_settings() -> InlineKeyboardMarkup:
 
 
 def alert_settings_panel(config: RuntimeConfig) -> InlineKeyboardMarkup:
-    """Per-detector switches. Each maps to a persisted boolean setting."""
+    """Per-alert switches. Each maps to a persisted boolean setting.
+
+    Task E: this panel controls **what gets sent**, so the resting-order row is
+    bound to ``enable_order_alerts`` and not to ``enable_order_detector``. Order
+    *detection* stays on internally — it is how TP/SL are discovered and how a fill
+    is attributed to an order — and turning this row off must not switch that off,
+    or the trade feed would lose the fills it depends on. The detector's own switch
+    lives in the monitoring panel, where its label says what it does.
+    """
     toggles = (
         ("Large trades", "enable_trade_detector", config.enable_trade_detector),
         ("Position changes", "enable_position_detector", config.enable_position_detector),
-        ("Resting orders", "enable_order_detector", config.enable_order_detector),
+        ("Resting order alerts", "enable_order_alerts", config.enable_order_alerts),
         ("Order cancellations", "enable_order_cancel_alerts", config.enable_order_cancel_alerts),
         ("Wallet tracking", "enable_wallet_tracking", config.enable_wallet_tracking),
         ("Order book levels", "enable_book_scanner", config.enable_book_scanner),

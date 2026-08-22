@@ -74,13 +74,61 @@ CANCEL_EVENTS = frozenset({EventType.ORDER_CANCELLED})
 
 #: Events that describe a trade that **actually happened**. This is the only set
 #: allowed to reach the primary whale feed, and it is what ``/recent`` and
-#: ``/whales`` count. A resting, modified or cancelled order is an *intention*
-#: and never appears here.
-EXECUTION_EVENTS = frozenset({EventType.WHALE_TRADE, EventType.WHALE_LIQUIDATED})
+#: ``/whales`` count as trades. A resting, modified or cancelled order is an
+#: *intention* and never appears here.
+#:
+#: A **fill is an execution.** ``ORDER_FILLED`` and ``ORDER_PARTIALLY_FILLED`` are
+#: members of both this set and :data:`ORDER_EVENTS`, because they are two true
+#: statements about one fact: the order's lifecycle reached a terminal (or
+#: partially consumed) state *by executing*. They are therefore reported as trades
+#: and are **not** gated behind the resting-order alert switch — the switch exists
+#: to silence intentions, and a fill is not an intention.
+EXECUTION_EVENTS = frozenset(
+    {
+        EventType.WHALE_TRADE,
+        EventType.WHALE_LIQUIDATED,
+        EventType.ORDER_FILLED,
+        EventType.ORDER_PARTIALLY_FILLED,
+    }
+)
+
+#: The order events that are *only* intentions: an order sitting on the book, its
+#: price or size being changed, it being pulled, or the exchange refusing it. None
+#: of these moved any coin, so none of them may be called a trade and all of them
+#: are silent unless an administrator explicitly asks for order alerts.
+RESTING_ORDER_EVENTS = ORDER_EVENTS - EXECUTION_EVENTS
+
+#: What the history commands show by default: things that happened. Executions
+#: plus verified position-state changes. Resting orders and aggregate book levels
+#: are intentions and appear only in the explicit order-monitor mode.
+FEED_EVENTS = EXECUTION_EVENTS | POSITION_EVENTS
 
 #: Coarse grouping used by the engine counters, the diagnostics panel and the
 #: history commands, so "trades observed" can never be inflated by order events.
 EVENT_CATEGORIES = ("execution", "position", "order", "book")
+
+
+def type_names(events: Iterable["EventType"]) -> tuple[str, ...]:
+    """The stored ``whale_events.event_type`` strings for a set of event types.
+
+    ``event_type`` is persisted as its ``.value``, so every query that filters
+    history by category goes through here rather than through the enum members.
+    :class:`EventType` subclasses :class:`str`, so comparing members to rows would
+    usually work — but the column is plain text and the sets are sorted here, which
+    keeps generated SQL stable and the intent obvious at the call site.
+    """
+    return tuple(sorted(event.value for event in events))
+
+
+#: Pre-computed string groupings for the repository layer, which stores and filters
+#: ``event_type`` as text and must not import the enum (:mod:`app.whale` imports
+#: :mod:`app.database.repository`, so the dependency runs whale → database only).
+EXECUTION_TYPE_NAMES = type_names(EXECUTION_EVENTS)
+POSITION_TYPE_NAMES = type_names(POSITION_EVENTS)
+ORDER_TYPE_NAMES = type_names(ORDER_EVENTS)
+RESTING_ORDER_TYPE_NAMES = type_names(RESTING_ORDER_EVENTS)
+FEED_TYPE_NAMES = type_names(FEED_EVENTS)
+BOOK_TYPE_NAMES = (EventType.BOOK_LEVEL.value,)
 
 
 class ValueKind(str, Enum):
@@ -186,13 +234,32 @@ class WhaleEvent:
         return self.event_type in ORDER_EVENTS
 
     @property
+    def is_resting_order_event(self) -> bool:
+        """True for an order *intention*: placed, modified, cancelled, rejected.
+
+        This — not :attr:`is_order_event` — is what the user-facing order-alert
+        switch gates. A fill is an order event too, but silencing "tell me about
+        resting orders" must never silence "a whale actually traded".
+        """
+        return self.event_type in RESTING_ORDER_EVENTS
+
+    @property
     def is_execution(self) -> bool:
-        """True when this event reports a trade that actually executed."""
+        """True when this event reports a trade that actually executed.
+
+        Includes a filled or partially filled order: the exchange consumed it, so
+        coin changed hands. Excludes everything that merely rested on the book.
+        """
         return self.event_type in EXECUTION_EVENTS
 
     @property
     def category(self) -> str:
-        """One of :data:`EVENT_CATEGORIES`. Keeps the counters honest."""
+        """One of :data:`EVENT_CATEGORIES`. Keeps the counters honest.
+
+        ``execution`` is tested first on purpose: a fill belongs to both
+        :data:`EXECUTION_EVENTS` and :data:`ORDER_EVENTS`, and it should be counted
+        as the trade it is rather than as one more order event.
+        """
         if self.event_type in EXECUTION_EVENTS:
             return "execution"
         if self.event_type in POSITION_EVENTS:
@@ -244,3 +311,85 @@ class WhaleEvent:
 
 def coin_of(events: Iterable[WhaleEvent]) -> set[str]:
     return {event.coin for event in events}
+
+
+def category_of_name(event_type: str) -> str:
+    """Category for a stored ``event_type`` string. One of :data:`EVENT_CATEGORIES`.
+
+    The string counterpart of :attr:`WhaleEvent.category`, for aggregate rows read
+    back from the database. ``execution`` is tested first for the same reason: a
+    fill is a trade, not one more order event.
+    """
+    if event_type in EXECUTION_TYPE_NAMES:
+        return "execution"
+    if event_type in POSITION_TYPE_NAMES:
+        return "position"
+    if event_type in ORDER_TYPE_NAMES:
+        return "order"
+    return "book"
+
+
+def summarize_events(summary: dict[str, Any]) -> dict[str, Any]:
+    """Split raw ``EventRepository.summary`` aggregates by category.
+
+    Spec Task D: *"Separate: Executed trades / Order events / Position events. Do
+    not report all whale events as 'trades.'"* The repository counts rows; deciding
+    which rows are trades is this layer's job, so the definition lives with
+    :data:`EXECUTION_EVENTS` and there is exactly one of it.
+
+    Two things are kept strictly apart:
+
+    * **Executions** contribute ``executions`` / ``execution_notional`` — money
+      that actually moved. Resting, modified and cancelled orders contribute to
+      ``order_events`` / ``order_notional``, which is *intended* value only.
+    * **BUY/SELL** (how an execution crossed the book) and **LONG/SHORT** (which
+      way a verified position points) are counted separately. A resting BUY order
+      is neither: it is an intention, and is counted in neither pair.
+
+    Returns a new mapping: the input is not mutated.
+    """
+    rows = summary.get("by_type_side") or []
+    out: dict[str, Any] = dict(summary)
+    totals = {name: {"count": 0, "notional": 0.0, "largest": 0.0} for name in EVENT_CATEGORIES}
+    sides = {"buys": 0, "sells": 0, "longs": 0, "shorts": 0}
+
+    for row in rows:
+        category = category_of_name(str(row.get("type", "")))
+        bucket = totals[category]
+        count = int(row.get("count", 0) or 0)
+        bucket["count"] += count
+        bucket["notional"] += float(row.get("notional", 0.0) or 0.0)
+        bucket["largest"] = max(bucket["largest"], float(row.get("largest", 0.0) or 0.0))
+
+        side = (row.get("side") or "").upper()
+        if category == "execution":
+            if side == "BUY":
+                sides["buys"] += count
+            elif side == "SELL":
+                sides["sells"] += count
+            # A liquidation carries the *position* side that was force-closed, so
+            # it is counted there rather than as a discretionary BUY or SELL.
+            elif side == "LONG":
+                sides["longs"] += count
+            elif side == "SHORT":
+                sides["shorts"] += count
+        elif category == "position":
+            if side == "LONG":
+                sides["longs"] += count
+            elif side == "SHORT":
+                sides["shorts"] += count
+
+    out.update(
+        {
+            "executions": totals["execution"]["count"],
+            "execution_notional": totals["execution"]["notional"],
+            "largest_execution": totals["execution"]["largest"],
+            "position_events": totals["position"]["count"],
+            "position_notional": totals["position"]["notional"],
+            "order_events": totals["order"]["count"],
+            "order_notional": totals["order"]["notional"],
+            "book_events": totals["book"]["count"],
+            **sides,
+        }
+    )
+    return out

@@ -63,6 +63,11 @@ REASON_MARGIN_UNKNOWN = "margin_unknown"
 #: moment of liquidation on any feed (`.agent/API_NOTES.md` §5). So the gate
 #: would read "margin unknown" and reject every liquidation — turning the margin
 #: filter into an off switch for the one event it least applies to.
+#:
+#: Fills stay in the exempt set for the same data-availability reason even though
+#: they are executions: an order event is built from ``orderUpdates`` /
+#: ``frontendOpenOrders``, neither of which carries ``marginUsed``, so the gate
+#: could only ever answer "unknown" and would silence every fill.
 MARGIN_EXEMPT_EVENTS = (
     frozenset({EventType.BOOK_LEVEL, EventType.WHALE_LIQUIDATED}) | ORDER_EVENTS
 )
@@ -122,11 +127,18 @@ class WhaleFilter:
         if not cfg.detector_enabled(detector):
             return FilterResult(False, REASON_DETECTOR)
 
-        # An order is an intention, not a trade. Order tracking keeps running
-        # (it is where TP/SL and fill attribution come from); publishing is a
-        # separate, off-by-default decision, so the primary feed carries
+        # A resting order is an intention, not a trade. Order tracking keeps
+        # running (it is where TP/SL and fill attribution come from); publishing
+        # is a separate, off-by-default decision, so the primary feed carries
         # executions and position changes only.
-        if event.is_order_event and not cfg.enable_order_alerts:
+        #
+        # The gate is deliberately on ``is_resting_order_event`` and not on
+        # ``is_order_event``: a filled order **is** an execution, and silencing
+        # "tell me about orders sitting on the book" must not silence "a whale
+        # actually traded". That was the reported defect in reverse — the feed used
+        # to announce intentions as trades, and the naive fix would have hidden
+        # real fills.
+        if event.is_resting_order_event and not cfg.enable_order_alerts:
             return FilterResult(False, REASON_ORDER_ALERTS_OFF)
 
         if event.event_type in CANCEL_EVENTS and not cfg.enable_order_cancel_alerts:

@@ -229,7 +229,12 @@ class WhaleDetector:
 
     def _attach_position(self, event: WhaleEvent, ctx: PositionContext) -> None:
         position = ctx.position
-        if position is None:
+        # A flat snapshot is not a position. Hyperliquid drops closed positions
+        # from ``assetPositions``, but a snapshot taken mid-close can still carry
+        # ``szi == 0`` with the entry price, leverage and liquidation price of the
+        # position that has just gone — and attaching those would report a
+        # position the trader no longer holds (Task F).
+        if position is None or position.is_flat:
             event.set("position_value", DataPoint.unavailable("no open position for this coin"))
             event.set("entry_px", DataPoint.unavailable("no open position for this coin"))
             event.set("liquidation_px", DataPoint.unavailable("no open position for this coin"))
@@ -609,8 +614,6 @@ class WhaleDetector:
             return None
 
         ctx = context or PositionContext()
-        if ctx.position is None:
-            ctx = replace(ctx, position=after)
         price = (
             self.current_price(coin)
             or (after.entry_px if after else None)
@@ -631,6 +634,14 @@ class WhaleDetector:
         else:
             event_type, detection = EventType.POSITION_DECREASED, "Position reduced"
 
+        if ctx.position is None and after is not None and abs(after.szi) > DUST:
+            # Only a snapshot that still holds a position may act as the live
+            # context. A closing snapshot carries ``szi == 0`` with stale entry,
+            # leverage and liquidation figures attached; presenting those as the
+            # trader's current position would be reporting a position that no longer
+            # exists. The close's own figures are read from ``before`` below.
+            ctx = replace(ctx, position=after)
+
         # Closures are measured by the notional that left the book; everything
         # else by the delta's value.
         if event_type is EventType.POSITION_CLOSED:
@@ -643,7 +654,16 @@ class WhaleDetector:
         if notional < min_notional:
             return None
 
-        side = (after.side if after else None) or (before.side if before else None)
+        # The side comes from the last snapshot that actually held a position, and
+        # from nothing else (Task F). A closing snapshot has ``szi == 0`` and so no
+        # side of its own, so reading it there would relabel every closed LONG as a
+        # SHORT; and an execution's BUY/SELL is never evidence either way, because a
+        # SELL may be reducing a long and a BUY may be reducing a short.
+        side = None
+        for snapshot in (after, before):
+            if snapshot is not None and abs(snapshot.szi) > DUST:
+                side = snapshot.side
+                break
         event = WhaleEvent(
             event_type=event_type,
             coin=coin,
@@ -688,7 +708,14 @@ class WhaleDetector:
                 )
 
         self._attach_position(event, ctx)
-        self._attach_market(event, after.entry_px if after else (before.entry_px if before else None))
+        # Same rule for the market comparison: a closed position's entry price is
+        # not a reference the reader can act on, so nothing is compared against it.
+        reference_entry = (
+            ctx.position.entry_px
+            if ctx.position is not None and not ctx.position.is_flat
+            else None
+        )
+        self._attach_market(event, reference_entry)
         return event
 
     # ── 3. resting order lifecycle ────────────────────────────
@@ -756,6 +783,21 @@ class WhaleDetector:
             placed_at=update.timestamp,
             status=status,
         )
+        if event_type is EventType.ORDER_FILLED:
+            # What executed is what was still resting a moment ago. With no
+            # previous state the original size is the best figure the feed offers.
+            self._as_execution(
+                event,
+                executed_size=previous.size if previous is not None else update.orig_sz,
+                price=update.limit_px,
+                fallback_notional=update.original_notional or update.notional,
+            )
+        elif event_type is EventType.ORDER_PARTIALLY_FILLED and previous is not None:
+            self._as_execution(
+                event,
+                executed_size=max(0.0, previous.size - update.sz),
+                price=update.limit_px,
+            )
         return event
 
     def from_open_order(
@@ -807,6 +849,12 @@ class WhaleDetector:
             tif=order.tif,
             is_position_tpsl=order.is_position_tpsl,
         )
+        if event_type is EventType.ORDER_PARTIALLY_FILLED and previous is not None:
+            self._as_execution(
+                event,
+                executed_size=max(0.0, previous.size - order.sz),
+                price=order.price,
+            )
         return event
 
     def from_order_disappearance(
@@ -874,7 +922,49 @@ class WhaleDetector:
                 "status_note",
                 DataPoint.unavailable("orderStatus lookup unavailable; cancel vs fill unresolved"),
             )
+        if event_type is EventType.ORDER_FILLED:
+            # The order vanished and ``orderStatus`` said it filled, so the size
+            # that was still resting is the size that executed.
+            self._as_execution(
+                event,
+                executed_size=previous.size,
+                price=previous.limit_px,
+                fallback_notional=previous.notional,
+            )
         return event
+
+    def _as_execution(
+        self,
+        event: WhaleEvent,
+        *,
+        executed_size: float | None,
+        price: float | None,
+        fallback_notional: float | None = None,
+    ) -> None:
+        """Re-measure a fill as the execution it is.
+
+        An order event's natural figure is the order's notional — for a *filled*
+        order that is the wrong number twice over. Hyperliquid reports a completed
+        order with its remaining size, which is zero, so the raw figure is ``$0``;
+        and the order's face value is what the trader *asked* for, which is not
+        what executed once part of it had already been consumed.
+
+        So the figure becomes the value that actually changed hands, and
+        :class:`ValueKind` becomes ``TRADE_VALUE`` — which is also what routes the
+        event to the *trade* threshold rather than the resting-order one. The
+        executed size and value are kept as their own data points so the renderer
+        never has to reach for the remaining-size field.
+        """
+        executed: float | None = None
+        if executed_size is not None and price:
+            executed = abs(float(price) * float(executed_size))
+        if not executed:
+            executed = abs(float(fallback_notional or 0.0)) or event.notional
+        event.notional = executed
+        event.value_kind = ValueKind.TRADE_VALUE
+        if executed_size is not None:
+            event.set("executed_size", DataPoint.confirmed(abs(float(executed_size))))
+        event.set("executed_notional", DataPoint.confirmed(executed))
 
     def _decorate_order(
         self,

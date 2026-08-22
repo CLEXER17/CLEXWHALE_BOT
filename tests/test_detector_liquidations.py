@@ -259,9 +259,10 @@ def test_the_alert_leads_with_the_liquidation_header():
     assert event is not None
     text = render(event)
     assert text.startswith("💥 WHALE LIQUIDATED")
-    assert text.endswith("🐋 Whale Monitor")
+    assert text.endswith("🐋 CLEXER WHALE MONITOR")
     assert "💥 <b>Liquidated value:</b> $5,700,000" in text
-    assert "🔎 <b>Detection:</b> Forced liquidation" in text
+    assert "🔎 <b>VERIFIED LIQUIDATION</b>" in text
+    assert "🧾 <b>Route:</b> Forced liquidation" in text
 
 
 def test_an_unknown_side_is_printed_as_unavailable_with_its_reason():
@@ -304,4 +305,9 @@ def test_the_alert_never_prints_leverage_margin_or_tpsl_lines():
 def test_the_full_wallet_address_is_shown_in_monospace():
     event = detector().from_liquidation(WALLET_A, make_liquidation_fill())
     assert event is not None
-    assert f"👤 <b>Trader:</b> <code>{WALLET_A.lower()}</code>" in render(event)
+    text = render(event)
+    # Label and address on separate lines, so a 42-character address never wraps
+    # mid-value — but the value itself is complete and in monospace.
+    assert "👤 <b>Trader:</b>" in text
+    assert f"\n<code>{WALLET_A.lower()}</code>" in text
+    assert "..." not in text

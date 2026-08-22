@@ -259,9 +259,10 @@ async def test_a_raw_trades_frame_becomes_one_formatted_whale_alert(wire):
     assert message["parse_mode"] == "HTML"
     text = message["text"]
 
-    # Header, footer and the §16 divider structure.
-    assert text.startswith("🐋 HYPERLIQUID WHALE ALERT")
-    assert text.endswith("🐋 Whale Monitor")
+    # Header, footer and the §4 divider structure. Only something that actually
+    # executed may be headed "WHALE TRADE".
+    assert text.startswith("🐋 WHALE TRADE")
+    assert text.endswith("🐋 CLEXER WHALE MONITOR")
     assert text.count(DIVIDER) == 3
 
     # Coin, direction and the value the threshold was applied to. The side is
@@ -269,23 +270,29 @@ async def test_a_raw_trades_frame_becomes_one_formatted_whale_alert(wire):
     assert "🪙 <b>BTC</b>" in text
     assert "🟢 BUY" in text
     assert "📈 LONG" not in text
-    assert "💱 <b>Trade:</b> $5,000,000" in text        # executed trade value
+    assert "💵 <b>Price:</b> $100,000.00" in text
+    assert "📦 <b>Quantity:</b> 50 BTC" in text          # the size that executed
+    assert "💰 <b>Executed:</b> $5,000,000" in text      # executed trade value
 
-    # Everything below came from clearinghouseState / frontendOpenOrders.
-    assert "💰 <b>Position:</b> $6,000,000" in text     # not the same as the trade
+    # Everything below came from clearinghouseState / frontendOpenOrders, and is
+    # labelled as position data so it can never be read as the trade.
+    assert "💼 <b>Position:</b> $6,000,000" in text      # not the same as the trade
     assert "🎯 <b>Entry:</b> $98,000.00" in text
     assert "⚡ <b>Leverage:</b> 5x (cross)" in text
     assert "💀 <b>Liquidation:</b> $74,500.00" in text
     assert "🎯 <b>TP:</b> $115,000.00" in text
     assert "🛑 <b>SL:</b> $88,000.00" in text
-    assert "📦 <b>Size:</b> 60 BTC" in text
+    assert "📦 <b>Position size:</b> 60 BTC" in text
     assert "🏦 <b>Margin:</b> $1.18M" in text
 
     # Wallet formatting: the full address, copy-pasteable, no identity claim (§20).
-    assert f"👤 <b>Trader:</b> <code>{WALLET_A}</code>" in text
+    assert "👤 <b>Trader:</b>" in text
+    assert f"<code>{WALLET_A}</code>" in text
     assert "..." not in text                             # never an abbreviation
-    assert "🕐 <b>Detected:</b>" in text
-    assert "🔎 <b>Detection:</b> Large market trade (executed trade value)" in text
+    assert "🕐 " in text
+    # The evidence line, and the route separately from it.
+    assert "🔎 <b>VERIFIED EXECUTION</b>" in text
+    assert "🧾 <b>Route:</b> Large market trade (executed trade value)" in text
 
 
 async def test_the_alert_is_backed_by_exactly_one_persisted_event(wire, database):
@@ -586,10 +593,15 @@ async def test_the_reserve_still_stops_the_fetch_when_the_budget_is_nearly_gone(
 async def test_tpsl_is_still_fetched_with_the_order_detector_switched_off(wire, container):
     """Root cause 2: one flag governed two responsibilities.
 
-    ``enable_order_detector`` means "alert me about large resting orders". It was
-    also the gate on the only request that reveals TP/SL, so switching off
-    order *alerts* silently switched off TP/SL on every position alert too. The
-    fetch is now made for an alert regardless; emission still respects the flag.
+    ``enable_order_detector`` is internal order *tracking* — the only request that
+    reveals TP/SL — and it was also the gate on the fetch, so switching it off
+    silently switched off TP/SL on every position alert too. The fetch is now made
+    for an alert regardless; emission of order events still respects the flag.
+
+    Task E split the user-facing switch out into ``enable_order_alerts``; this test
+    covers the internal one, and
+    ``test_the_detector_may_track_orders_while_order_alerts_are_off`` covers the
+    combination the defaults ship with.
     """
     await container.settings.set_value("enable_order_detector", False, MAIN_ADMIN_ID)
     stack = await wire()
@@ -611,7 +623,7 @@ async def test_a_missing_liquidation_price_is_reported_as_na(wire):
 
     text = stack.texts[0]
     assert "💀 <b>Liquidation:</b> N/A" in text
-    assert "💰 <b>Position:</b> $6,000,000" in text        # the rest still stands
+    assert "💼 <b>Position:</b> $6,000,000" in text        # the rest still stands
 
 
 async def test_a_wallet_with_no_position_says_so_instead_of_guessing(wire):
@@ -621,12 +633,12 @@ async def test_a_wallet_with_no_position_says_so_instead_of_guessing(wire):
 
     text = stack.texts[0]
     assert "ℹ️ <b>Position data:</b> unavailable" in text
-    assert "💰 <b>Position:</b>" not in text
+    assert "💼 <b>Position:</b>" not in text
     assert "🎯 <b>Entry:</b>" not in text
     assert "⚡ <b>Leverage:</b>" not in text
     assert "🟢 BUY" in text                                # falls back to the trade side
-    assert "💱 <b>Trade:</b> $5,000,000" in text           # the trade itself is real
-    assert "📦 <b>Size:</b> 50 BTC" in text                # the traded size, not a position
+    assert "💰 <b>Executed:</b> $5,000,000" in text        # the trade itself is real
+    assert "📦 <b>Quantity:</b> 50 BTC" in text            # the traded size, not a position
 
 
 async def test_an_unattributed_trade_never_invents_a_wallet(wire, database):
@@ -721,7 +733,8 @@ async def test_a_liquidation_on_the_other_side_is_attributed_to_the_liquidated_w
     await stack.user_events(WALLET_A, raw_user_events([fill]))
 
     text = stack.texts[0]
-    assert f"👤 <b>Trader:</b> <code>{WALLET_B.lower()}</code>" in text
+    assert "👤 <b>Trader:</b>" in text
+    assert f"<code>{WALLET_B.lower()}</code>" in text
     assert f"<code>{WALLET_A.lower()}</code> (counterparty fill)" in text
     # closedPnl on that fill is A's result, not B's loss.
     assert "⚪ <b>Realized PnL:</b> N/A" in text

@@ -65,7 +65,7 @@ QUEUE_MAX = 500
 #: Pause between consecutive chats so a broadcast does not burst Telegram.
 INTER_CHAT_DELAY = 0.06
 RECIPIENT_CACHE_TTL = 30.0
-FOOTER = "🐋 Whale Monitor"
+FOOTER = "🐋 CLEXER WHALE MONITOR"
 
 #: How long a reply thread stays open. A wallet that goes quiet for longer starts
 #: a fresh thread rather than replying to a message far up the chat history.
@@ -74,23 +74,55 @@ THREAD_TTL = timedelta(hours=12)
 #: limit. Oldest entries are discarded first.
 THREAD_MAX = 2000
 
-#: Header per event type. Position openings and large trades use the canonical
-#: signal format; lifecycle changes get their own headline.
+#: Header per event type. The first word of an alert has to be true on its own,
+#: because it is what a reader sees in a notification preview: only something that
+#: actually executed may be headed ``WHALE TRADE``, and an order that is merely
+#: resting, changed or pulled says so.
 HEADERS: dict[EventType, str] = {
-    EventType.WHALE_TRADE: "🐋 HYPERLIQUID WHALE ALERT",
+    EventType.WHALE_TRADE: "🐋 WHALE TRADE",
     EventType.WHALE_LIQUIDATED: "💥 WHALE LIQUIDATED",
-    EventType.POSITION_OPENED: "🐋 HYPERLIQUID WHALE ALERT",
+    EventType.POSITION_OPENED: "🐋 WHALE POSITION OPENED",
     EventType.POSITION_INCREASED: "🐋 WHALE POSITION INCREASED",
     EventType.POSITION_DECREASED: "🐋 WHALE POSITION REDUCED",
     EventType.POSITION_CLOSED: "🐋 WHALE POSITION CLOSED",
     EventType.POSITION_FLIPPED: "🔄 WHALE POSITION FLIPPED",
     EventType.ORDER_PLACED: "🐋 LARGE LIMIT ORDER",
     EventType.ORDER_MODIFIED: "✏️ WHALE ORDER MODIFIED",
-    EventType.ORDER_PARTIALLY_FILLED: "⏳ WHALE ORDER PARTIALLY FILLED",
-    EventType.ORDER_FILLED: "✅ WHALE ORDER FILLED",
+    EventType.ORDER_PARTIALLY_FILLED: "🐋 WHALE TRADE — PARTIAL FILL",
+    EventType.ORDER_FILLED: "🐋 WHALE TRADE — ORDER FILLED",
     EventType.ORDER_CANCELLED: "🚨 WHALE ORDER CANCELLED",
     EventType.ORDER_REJECTED: "⛔ WHALE ORDER REJECTED",
     EventType.BOOK_LEVEL: "🐋 LARGE BOOK LEVEL",
+}
+
+#: Position openings and increases lead with the direction, so a reader can tell
+#: a new long from a new short before reading a single field.
+DIRECTIONAL_HEADERS: dict[tuple[EventType, str], str] = {
+    (EventType.POSITION_OPENED, "LONG"): "📈 WHALE LONG POSITION OPENED",
+    (EventType.POSITION_OPENED, "SHORT"): "📉 WHALE SHORT POSITION OPENED",
+    (EventType.POSITION_INCREASED, "LONG"): "📈 WHALE LONG POSITION INCREASED",
+    (EventType.POSITION_INCREASED, "SHORT"): "📉 WHALE SHORT POSITION INCREASED",
+}
+
+#: The one line that says what kind of evidence the alert rests on. An execution
+#: is labelled ``VERIFIED EXECUTION``; an intention is labelled as *not* an
+#: execution, in those words, so a $6.83M order that was merely cancelled can
+#: never be read as a $6.83M trade.
+VERIFICATION_LABELS: dict[EventType, str] = {
+    EventType.WHALE_TRADE: "VERIFIED EXECUTION",
+    EventType.WHALE_LIQUIDATED: "VERIFIED LIQUIDATION",
+    EventType.ORDER_FILLED: "VERIFIED EXECUTION",
+    EventType.ORDER_PARTIALLY_FILLED: "VERIFIED PARTIAL EXECUTION",
+    EventType.POSITION_OPENED: "VERIFIED POSITION",
+    EventType.POSITION_INCREASED: "VERIFIED POSITION CHANGE",
+    EventType.POSITION_DECREASED: "VERIFIED POSITION CHANGE",
+    EventType.POSITION_FLIPPED: "VERIFIED POSITION CHANGE",
+    EventType.POSITION_CLOSED: "VERIFIED POSITION CLOSURE",
+    EventType.ORDER_PLACED: "RESTING ORDER — NOT AN EXECUTION",
+    EventType.ORDER_MODIFIED: "ORDER CHANGED — NOT AN EXECUTION",
+    EventType.ORDER_CANCELLED: "ORDER CANCELLED — NOTHING WAS TRADED",
+    EventType.ORDER_REJECTED: "ORDER REJECTED — NOTHING WAS TRADED",
+    EventType.BOOK_LEVEL: "AGGREGATE BOOK LEVEL — NOT AN EXECUTION",
 }
 
 SIDE_BADGES = {
@@ -280,9 +312,136 @@ class AlertService:
             return self._render_book(event)
         if event.event_type is EventType.WHALE_LIQUIDATED:
             return self._render_liquidation(event)
+        if event.is_execution:
+            # WHALE_TRADE and the two fill events. A fill is an execution, so it
+            # gets the execution format — never the resting-order one.
+            return self._render_trade(event)
         if event.is_order_event:
             return self._render_order(event)
         return self._render_position(event)
+
+    # -- verified executions (spec §4) --
+    def _render_trade(self, event: WhaleEvent) -> str:
+        """The primary whale feed: a trade that actually happened.
+
+        Every line here describes the *execution* — the price it printed at, the
+        quantity that moved, the USD that changed hands. Position fields follow
+        only when a verified ``clearinghouseState`` snapshot backs them, and they
+        are labelled as position fields, because the size a wallet now holds and
+        the size it just traded are different numbers.
+        """
+        coin = escape_html(event.coin)
+        lines = [
+            self._header(event),
+            DIVIDER,
+            f"🪙 <b>{coin}</b>",
+            self._side_line(event),
+        ]
+
+        price = event.point("price")
+        lines.append(
+            f"💵 <b>Price:</b> {fmt_price(price.value)}{marker(price)}"
+            if price.available
+            else "💵 <b>Price:</b> N/A"
+        )
+
+        # The quantity that executed. For a fill this is what was consumed, which
+        # is not the remaining size the exchange reports once the order is done.
+        quantity = event.point("executed_size")
+        if not quantity.available:
+            quantity = event.point("size")
+        if quantity.available:
+            lines.append(f"📦 <b>Quantity:</b> {fmt_size(quantity.value)} {coin}")
+
+        lines.append(f"💰 <b>Executed:</b> {fmt_usd_full(event.notional)}")
+
+        if event.order_id is not None:
+            # A fill: name the order it belonged to, and what remains of it.
+            lines.append(f"🧾 <b>Order:</b> <code>{event.order_id}</code>")
+            original = event.point("orig_notional")
+            if original.available:
+                lines.append(
+                    f"📄 <b>Order value:</b> {fmt_usd(original.value)}{marker(original)}"
+                )
+            remaining = event.point("remaining_notional")
+            if remaining.available and float(remaining.value) > 0:
+                lines.append(f"📉 <b>Still resting:</b> {fmt_usd(remaining.value)}{marker(remaining)}")
+
+        lines.extend(self._position_context_lines(event))
+
+        current = event.point("current_px")
+        if current.available:
+            lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
+        entry_distance = event.point("entry_distance_pct")
+        if entry_distance.available:
+            lines.append(f"📐 <b>From Entry:</b> {fmt_pct(entry_distance.value)}")
+        elif event.has("distance_pct"):
+            lines.append(
+                f"📐 <b>Fill vs mark:</b> {_distance_text(event.numeric('distance_pct'))}"
+            )
+
+        lines.append(DIVIDER)
+        lines.extend(self._trader_lines(event))
+        lines.append(self._time_line(event))
+        lines.append(self._verification_line(event))
+        lines.append(self._route_line(event))
+        lines.append(DIVIDER)
+        lines.append(FOOTER)
+        return "\n".join(lines)
+
+    def _position_context_lines(self, event: WhaleEvent) -> list[str]:
+        """What the wallet holds, if a verified snapshot said so.
+
+        Kept separate from the execution lines above and prefixed as *Position*
+        throughout: an execution and the position it belongs to are two objects,
+        and a reader must never have to guess which number is which.
+        """
+        position_value = event.point("position_value")
+        if not position_value.available:
+            reason = _short_reason(position_value.note) or "wallet not enriched yet"
+            return [f"ℹ️ <b>Position data:</b> unavailable — {escape_html(reason)}"]
+
+        lines = [
+            f"💼 <b>Position:</b> {fmt_usd_full(position_value.value)}{marker(position_value)}"
+        ]
+        held = event.point("position_size")
+        if held.available:
+            lines.append(f"📦 <b>Position size:</b> {fmt_size(held.value)} {escape_html(event.coin)}")
+
+        entry = event.point("entry_px")
+        lines.append(
+            f"🎯 <b>Entry:</b> {fmt_price(entry.value)}{marker(entry)}"
+            if entry.available
+            else "🎯 <b>Entry:</b> N/A"
+        )
+
+        leverage = event.point("leverage")
+        lines.append(
+            f"⚡ <b>Leverage:</b> "
+            f"{fmt_leverage(leverage.value, event.value('leverage_type'))}{marker(leverage)}"
+            if leverage.available
+            else "⚡ <b>Leverage:</b> N/A"
+        )
+
+        liq = event.point("liquidation_px")
+        lines.append(
+            f"💀 <b>Liquidation:</b> {fmt_price(liq.value)}{marker(liq)}"
+            if liq.available
+            else "💀 <b>Liquidation:</b> N/A"
+        )
+
+        lines.append(self._tpsl_line(event, "take_profit_px", "🎯", "TP"))
+        lines.append(self._tpsl_line(event, "stop_loss_px", "🛑", "SL"))
+
+        pnl = event.point("unrealized_pnl")
+        if pnl.available:
+            emoji = "🟢" if float(pnl.value) >= 0 else "🔴"
+            lines.append(f"{emoji} <b>Unrealised:</b> {fmt_usd(pnl.value)}{marker(pnl)}")
+
+        margin = event.point("margin_used")
+        if margin.available:
+            lines.append(f"🏦 <b>Margin:</b> {fmt_usd(margin.value)}{marker(margin)}")
+        return lines
 
     # -- forced liquidations --
     def _render_liquidation(self, event: WhaleEvent) -> str:
@@ -297,7 +456,7 @@ class AlertService:
         """
         coin = escape_html(event.coin)
         lines = [
-            HEADERS[EventType.WHALE_LIQUIDATED],
+            self._header(event),
             DIVIDER,
             f"🪙 <b>{coin}</b>",
             self._liquidated_side_line(event),
@@ -357,9 +516,10 @@ class AlertService:
             )
 
         lines.append(DIVIDER)
-        lines.append(self._trader_line(event))
+        lines.extend(self._trader_lines(event))
         lines.append(self._time_line(event))
-        lines.append(f"🔎 <b>Detection:</b> {escape_html(self._detection_label(event))}")
+        lines.append(self._verification_line(event))
+        lines.append(self._route_line(event))
         lines.append(DIVIDER)
         lines.append(FOOTER)
         return "\n".join(lines)
@@ -368,7 +528,7 @@ class AlertService:
     def _render_position(self, event: WhaleEvent) -> str:
         coin = escape_html(event.coin)
         lines = [
-            HEADERS.get(event.event_type, "🐋 HYPERLIQUID WHALE ALERT"),
+            self._header(event),
             DIVIDER,
             f"🪙 <b>{coin}</b>",
             self._side_line(event),
@@ -389,7 +549,7 @@ class AlertService:
 
         if live_position:
             lines.append(
-                f"💰 <b>Position:</b> {fmt_usd_full(position_value.value)}{marker(position_value)}"
+                f"💼 <b>Position:</b> {fmt_usd_full(position_value.value)}{marker(position_value)}"
             )
 
         if entry.available:
@@ -420,14 +580,11 @@ class AlertService:
             lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
         # A *position* distance is measured against its entry, and is labelled
         # "From Entry" so it can never be read as an order's distance from the
-        # mark. For a bare execution with no position we say what it really is.
+        # mark. (An execution's own distance is rendered by ``_render_trade``;
+        # only position events reach this method.)
         entry_distance = event.point("entry_distance_pct")
         if entry_distance.available:
             lines.append(f"📐 <b>From Entry:</b> {fmt_pct(entry_distance.value)}")
-        elif event.event_type is EventType.WHALE_TRADE and event.has("distance_pct"):
-            lines.append(
-                f"📐 <b>Fill vs mark:</b> {_distance_text(event.numeric('distance_pct'))}"
-            )
 
         if live_position or event.has("take_profit_px") or event.has("stop_loss_px"):
             lines.append(self._tpsl_line(event, "take_profit_px", "🎯", "TP"))
@@ -437,7 +594,10 @@ class AlertService:
         if not size.available:
             size = event.point("size")
         if size.available:
-            lines.append(f"📦 <b>Size:</b> {fmt_size(size.value)} {coin}")
+            # Only position events reach this method, so the figure is the size
+            # the wallet holds — labelled as such so it is never read as the
+            # quantity that just traded.
+            lines.append(f"📦 <b>Position size:</b> {fmt_size(size.value)} {coin}")
 
         if event.event_type is EventType.POSITION_CLOSED:
             lines.append(self._closed_pnl_line(event))
@@ -470,9 +630,10 @@ class AlertService:
                 lines.append(f"ℹ️ <b>Position data:</b> unavailable — {escape_html(reason)}")
 
         lines.append(DIVIDER)
-        lines.append(self._trader_line(event))
+        lines.extend(self._trader_lines(event))
         lines.append(self._time_line(event))
-        lines.append(f"🔎 <b>Detection:</b> {escape_html(self._detection_label(event))}")
+        lines.append(self._verification_line(event))
+        lines.append(self._route_line(event))
         lines.append(DIVIDER)
         lines.append(FOOTER)
         return "\n".join(lines)
@@ -482,7 +643,7 @@ class AlertService:
         coin = escape_html(event.coin)
         cancelled = event.event_type is EventType.ORDER_CANCELLED
         lines = [
-            HEADERS.get(event.event_type, "🐋 LARGE LIMIT ORDER"),
+            self._header(event),
             DIVIDER,
             f"🪙 <b>{coin}</b>",
             self._order_side_line(event),
@@ -505,7 +666,7 @@ class AlertService:
             if remaining.available:
                 lines.append(f"📉 <b>Remaining:</b> {fmt_usd(remaining.value)}{marker(remaining)}")
         else:
-            lines.append(f"💰 <b>Size:</b> {fmt_usd_full(event.notional)}")
+            lines.append(f"💰 <b>Order value:</b> {fmt_usd_full(event.notional)}")
             size = event.point("size")
             if size.available:
                 lines.append(f"📦 <b>Quantity:</b> {fmt_size(size.value)} {coin}")
@@ -541,10 +702,13 @@ class AlertService:
             trigger = event.point("trigger_px")
             lines.append(f"🎚 <b>Trigger:</b> {fmt_price(trigger.value)}{marker(trigger)}")
 
-        lines.append(self._trader_line(event))
-        lines.append(f"🕐 {fmt_time(event.event_time)}")
-        lines.append(f"🔎 <b>Detection:</b> {escape_html(self._detection_label(event))}")
         lines.append(DIVIDER)
+        lines.extend(self._trader_lines(event))
+        lines.append(self._time_line(event))
+        lines.append(self._verification_line(event))
+        lines.append(self._route_line(event))
+        lines.append(DIVIDER)
+        lines.append(FOOTER)
         return "\n".join(lines)
 
     # -- aggregate book levels --
@@ -553,9 +717,8 @@ class AlertService:
         price = event.point("price")
         current = event.point("current_px")
         distance = event.point("distance_pct")
-        attribution = event.point("wallet_attribution")
         lines = [
-            HEADERS[EventType.BOOK_LEVEL],
+            self._header(event),
             DIVIDER,
             f"🪙 <b>{coin}</b>",
             SIDE_BADGES.get(event.side or "", escape_html(event.side or "N/A")),
@@ -569,9 +732,13 @@ class AlertService:
             lines.append(f"📊 <b>Current:</b> {fmt_price(current.value)}")
         if distance.available:
             lines.append(f"📐 <b>Distance:</b> {_distance_text(float(distance.value))}")
-        lines.append(f"👤 <b>Trader:</b> N/A — {escape_html(_short_reason(attribution.note))}")
-        lines.append(f"🕐 {fmt_time(event.event_time)}")
         lines.append(DIVIDER)
+        lines.extend(self._trader_lines(event))
+        lines.append(self._time_line(event))
+        lines.append(self._verification_line(event))
+        lines.append(self._route_line(event))
+        lines.append(DIVIDER)
+        lines.append(FOOTER)
         return "\n".join(lines)
 
     # -- line builders --
@@ -647,7 +814,7 @@ class AlertService:
         """
         kind = event.value_kind
         if kind is ValueKind.TRADE_VALUE:
-            return f"💱 <b>Trade:</b> {fmt_usd_full(event.notional)}"
+            return f"💰 <b>Executed:</b> {fmt_usd_full(event.notional)}"
         if kind is ValueKind.POSITION_DELTA:
             delta = event.point("delta_value")
             suffix = marker(delta) if delta.available else ""
@@ -672,19 +839,68 @@ class AlertService:
             return f"{icon} <b>{label}:</b> N/A (not checked)"
         return f"{icon} <b>{label}:</b> N/A"
 
-    def _trader_line(self, event: WhaleEvent) -> str:
+    def _header(self, event: WhaleEvent) -> str:
+        """The first line, which has to be true on its own.
+
+        It is what a reader sees in a notification preview, so only something
+        that actually executed may be headed ``WHALE TRADE``. Position openings
+        and increases lead with the direction only for the position events, whose
+        side is read off the last verified ``clearinghouseState`` snapshot that
+        still held a position (:meth:`WhaleDetector.from_position_change`) and is
+        one of :data:`app.whale.lifecycle.POSITION_SIDES` — never the BUY/SELL of
+        whatever execution moved it, because a SELL that trims a long is still a
+        long.
+        """
+        side = (event.side or "").upper()
+        directional = DIRECTIONAL_HEADERS.get((event.event_type, side))
+        if directional:
+            return directional
+        return HEADERS.get(event.event_type, "🐋 WHALE ALERT")
+
+    def _trader_lines(self, event: WhaleEvent) -> list[str]:
+        """The wallet, in full, on a line of its own.
+
+        Two lines rather than one because a 42-character address and a label do
+        not fit together on a phone screen, and a mid-address line break is what
+        makes a reader mistake a complete address for a truncated one. The value
+        is never shortened anywhere — not here, not in the database, not in a
+        list view (spec §21). ``short_wallet`` survives for inline-button labels
+        only, where Telegram's 64-byte payload limit is a hard constraint.
+
+        With no wallet the line says so and names the reason: an aggregate book
+        level is genuinely anonymous, and inventing an address would be the worst
+        available fix (spec §28).
+        """
         if not event.wallet:
-            return "👤 <b>Trader:</b> N/A"
-        # The full checksum-less address, not an abbreviation: an alert is only
-        # actionable if the reader can copy the address into a block explorer.
-        # ``short_wallet`` stays for the compact list views, where a truncated
-        # address is a layout choice rather than a loss of information.
-        # Address only: no identity is claimed for any wallet (spec §20).
-        return f"👤 <b>Trader:</b> <code>{escape_html(event.wallet.lower())}</code>"
+            reason = _short_reason(event.point("wallet_attribution").note)
+            if not reason and event.event_type is EventType.BOOK_LEVEL:
+                reason = "aggregated order book"
+            return [
+                f"👤 <b>Trader:</b> N/A — {escape_html(reason)}"
+                if reason
+                else "👤 <b>Trader:</b> N/A"
+            ]
+        # Address only: no real-world identity is claimed for a wallet (spec §20).
+        return ["👤 <b>Trader:</b>", f"<code>{escape_html(event.wallet.lower())}</code>"]
+
+    def _verification_line(self, event: WhaleEvent) -> str:
+        """What evidence this alert rests on, said in one unambiguous line.
+
+        An execution is labelled ``VERIFIED EXECUTION``; an intention is labelled
+        as *not* an execution in those words, so a cancelled $6.83M order can
+        never be read as a $6.83M trade (spec §18).
+        """
+        label = VERIFICATION_LABELS.get(event.event_type)
+        if label is None:
+            label = "VERIFIED EXECUTION" if event.is_execution else "NOT AN EXECUTION"
+        return f"🔎 <b>{label}</b>"
+
+    def _route_line(self, event: WhaleEvent) -> str:
+        """Which detection route produced this, and which figure it measured."""
+        return f"🧾 <b>Route:</b> {escape_html(self._detection_label(event))}"
 
     def _time_line(self, event: WhaleEvent) -> str:
-        label = "Opened" if event.event_type is EventType.POSITION_OPENED else "Detected"
-        return f"🕐 <b>{label}:</b> {fmt_time(event.event_time)}"
+        return f"🕐 {fmt_time(event.event_time)}"
 
     def _status_label(self, event: WhaleEvent) -> str:
         raw = event.value("order_status") or event.status or "unknown"

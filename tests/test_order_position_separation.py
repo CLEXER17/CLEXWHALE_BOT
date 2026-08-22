@@ -130,7 +130,7 @@ def test_3_position_to_zero_is_closed_from_the_pre_close_snapshot():
     text = render(event)
     assert "🐋 WHALE POSITION CLOSED" in text
     assert "💰 <b>Closed:</b> $5,880,000" in text
-    assert "📦 <b>Size:</b> 0 BTC" in text
+    assert "📦 <b>Position size:</b> 0 BTC" in text
     # A position that no longer exists has no entry, leverage, liquidation or
     # TP/SL, and none are reconstructed or padded out with N/A.
     assert "ℹ️ Historical position details unavailable" in text

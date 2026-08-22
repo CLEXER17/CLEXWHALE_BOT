@@ -4,6 +4,70 @@ Newest first. One entry per logical milestone; mirrors the git history.
 
 ---
 
+## 2026-08-22 — Verified execution and position lifecycle
+
+Reported symptom: the bot announced **"WHALE TRADE"** for orders that had merely
+been placed in the book, and inferred a position side from the taker side of a
+fill. Both are fabrications with consequences — a resting limit order moved no
+coin, and a `SELL` is not a `SHORT` (it is equally the closing leg of a LONG).
+The fix runs one distinction through every layer: *an execution is a fill; an
+order is an intention; a position side is only ever read off a
+`clearinghouseState` snapshot.*
+
+**Event vocabulary** (`app/whale/events.py`). Three explicit name sets replace
+ad-hoc type lists: `EXECUTION_TYPE_NAMES` (what actually traded),
+`RESTING_ORDER_TYPE_NAMES` (placed / modified / cancelled / partially filled) and
+`FEED_TYPE_NAMES` (what the histories show by default). `summarize_events` now
+reports executions, order events and position events as three separate figures.
+
+**Alerting** (`app/services/alert_service.py`). `ORDER_FILLED` and any executed
+event render the whale-trade body; `ORDER_PLACED` / `ORDER_MODIFIED` /
+`ORDER_CANCELLED` render an order body whose value is labelled **intended** and,
+by default, are not published at all. `DIRECTIONAL_HEADERS` are restricted to
+`POSITION_OPENED` / `POSITION_INCREASED` × `LONG` / `SHORT`, so no headline can
+pair a fill side with a position word.
+
+**Detection vs publication** (`app/services/settings_service.py`,
+`app/whale/filters.py`, `app/bot/keyboards/inline.py`,
+`app/bot/handlers/callbacks.py`). `enable_order_detector` (keep tracking order
+state internally, default **on**) is now separate from `enable_order_alerts`
+(show them to humans, default **off**). Trade and position alerts stay on. The
+new switch is in the `_ALERT_TOGGLES` whitelist, so a forged callback naming any
+other key is still refused.
+
+**Thresholds measure what executed.** A fill's notional is recomputed as
+`|price × executed_size|` and its `value_kind` flipped to `TRADE_VALUE`, so a
+40-of-130 fill is weighed as $3.80M and not as the order's $12.35M intention.
+
+**Histories** (`app/bot/views.py`, `app/database/repository.py`). `/recent` and
+`/whales` filter to `history_types(config)` — executions and position changes,
+plus resting orders only when an admin turned order alerts on. The wallet
+leaderboard is counted from `whale_events` filtered to executions rather than from
+`wallets.event_count`, so a wallet that placed and cancelled one order is no
+longer credited with two trades.
+
+**Position lifecycle** (`app/whale/detector.py`,
+`app/hyperliquid/models.py`). `Position.side` returns `None` when flat instead of
+guessing, and `_attach_position` now treats a *flat* snapshot exactly like a
+missing one: `position_value`, `entry_px`, `liquidation_px` and `leverage` become
+`unavailable("no open position for this coin")` rather than zeros wearing the
+look of real data. A position reaching zero is `POSITION_CLOSED`, valued from the
+last non-zero snapshot.
+
+**Deduplication was deliberately left alone.** Identity remains the exchange
+`tid` (falling back to `oid` for order events) with the `seen_recently` TTL
+absorbing reconnect replays, and `whale_events.dedup_key` still carries **no**
+UNIQUE constraint — see `DECISIONS.md`. Over-deduplicating would silence genuine
+repeat activity, which is worse than storing one row twice.
+
+**Tests.** `tests/test_verified_execution.py` — 28 new tests covering spec
+requirements 1–24. Full suite: **587 passed / 0 failed**.
+
+Not verified: live Railway behaviour. Nothing in this milestone was observed
+against the deployed bot.
+
+---
+
 ## 2026-08-22 — Persistence and settings safety
 
 Two symptoms reported from production: *"when I change one setting, the bot

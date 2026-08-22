@@ -8,12 +8,14 @@ remove working features.** The repository is the source of truth.
 
 ## Current Objective
 
-Resume the paused **verified execution + position lifecycle** task (39-section
-spec). The persistence + settings-safety task that preceded it is complete.
+None outstanding in code. The **verified execution + position lifecycle** task
+(39-section spec) is complete, as is the persistence + settings-safety task before
+it. What is left is live work on the deployed bot: rotate the token, confirm the
+redeploy, and run the §33 six-step scenario.
 
 ## Current Phase
 
-Everything is implemented, tested (**555 passed, 0 failed**), documented and
+Everything is implemented, tested (**587 passed, 0 failed**), documented and
 pushed to <https://github.com/CLEXER17/CLEXWHALE_BOT>: foundation, config,
 database + migrations, Hyperliquid REST/WS clients, whale pipeline (parser →
 tracker → detector → filter → dedup), services (settings, admin/permissions,
@@ -56,26 +58,22 @@ execution/lifecycle engine, detector and filter work at `31d8095`.
 
 ## What Is Half-Finished
 
-**The 39-section verified-execution / position-lifecycle task.** Engine, detector
-and filter are done and committed (`31d8095`). Remaining, in order:
+Nothing in the code. **The 39-section verified-execution / position-lifecycle task
+is complete**: alert service, `/recent`, `/whales`, split summary metrics, the
+`enable_order_alerts` toggle UI, the position lifecycle, wallet formatting, and 28
+regression tests in `tests/test_verified_execution.py` covering spec requirements
+1–24. Full suite **587 passed / 0 failed** (2026-08-22).
 
-1. `app/services/alert_service.py` — `_render_trade` to the §4 format
-   (`🐋 WHALE TRADE`, `💰 Executed:`, `📦 Quantity:`, trader on its own line in
-   backticks and never truncated, bare `🕐 {fmt_time}`, `🔎 VERIFIED EXECUTION`,
-   footer `🐋 CLEXER WHALE MONITOR`), side-aware position headers, detection route
-   as its own `🧾 Route:` line.
-2. `/recent` and `/whales` filtered to `EXECUTION_EVENTS` only.
-3. Split `EventRepository.summary` metrics (§24), diagnostics counters (§25).
-4. The order-alerts toggle UI: `inline.alert_settings_panel` still toggles
-   `enable_order_detector` (internal tracking) and has **no**
-   `enable_order_alerts` switch. That is a real user-visible mismatch —
-   `app/bot/messages/texts.py:594-618` renders the same confusion.
-5. The 26 §31 regression tests, the §32 offline end-to-end test, the §33
-   six-step scenario for `0x31dea2516beee92135b96f464eeec3cf292a13f2`.
+Two items from the original spec were deliberately *not* built, and the reasons are
+recorded in `DECISIONS.md`:
 
-Assertions that will need updating when the trade format changes:
-`tests/test_detector_liquidations.py:262,264` and
-`tests/test_engine_pipeline.py:263,264,270,286,624`.
+- No UNIQUE constraint on `whale_events.dedup_key`, and therefore no third
+  migration — `0001_initial` and `0002_alert_thread_key` remain the only ones.
+- No collapsing of the two observations of one fill (`tid`-keyed `WHALE_TRADE`
+  from the trades feed, `oid`-keyed `ORDER_FILLED` from `orderUpdates`).
+
+Still open from the spec: the §33 six-step live scenario for
+`0x31dea2516beee92135b96f464eeec3cf292a13f2`, which needs the deployed bot.
 
 Unverifiable from here: **live alert delivery** on Railway. If alerts do not
 arrive, suspect recipients rather than wiring —
@@ -89,7 +87,7 @@ file.
 
 ## Exact Files Being Worked On
 
-None mid-edit. Next to open: `app/services/alert_service.py`.
+None mid-edit.
 
 ## Current Error
 
@@ -97,14 +95,14 @@ None.
 
 ## Last Command Run
 
-`./.venv/Scripts/python.exe -m pytest -q` → 555 passed.
+`./.venv/Scripts/python.exe -m pytest -q` → 587 passed.
 
 Note: the bare `python` on PATH is **not** the project interpreter and lacks
 `pytest_asyncio`. Always use `./.venv/Scripts/python.exe`.
 
 ## Last Test Result
 
-**555 passed, 0 failed.** Per-module counts in `TEST_STATUS.md`.
+**587 passed, 0 failed.** Per-module counts in `TEST_STATUS.md`.
 
 ## Next Exact Action
 

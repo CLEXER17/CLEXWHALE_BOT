@@ -131,8 +131,27 @@ class Position:
         return self.szi > 0
 
     @property
-    def side(self) -> str:
-        return "LONG" if self.szi > 0 else "SHORT"
+    def is_flat(self) -> bool:
+        """No position. Hyperliquid drops closed positions from
+        ``assetPositions``, but a snapshot taken mid-close can still carry
+        ``szi == 0``."""
+        return self.szi == 0
+
+    @property
+    def side(self) -> str | None:
+        """``LONG``, ``SHORT``, or ``None`` when the position is flat.
+
+        A flat position has no side, and saying "SHORT" for one would be a
+        fabrication with consequences: a closing snapshot arrives with ``szi == 0``,
+        and reading a side off it would label every closed LONG as a SHORT. Callers
+        that need the side of a position that has just closed must read it from the
+        last non-zero snapshot instead.
+        """
+        if self.szi > 0:
+            return "LONG"
+        if self.szi < 0:
+            return "SHORT"
+        return None
 
     @property
     def abs_size(self) -> float:

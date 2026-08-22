@@ -1,77 +1,102 @@
-# NOW
+# NOW — resume here, read this file first
 
-CURRENT TASK:
-Critical persistence + settings safety fix (34-section spec). Two production
-symptoms: (1) changing one setting replaced other settings, (2) settings lost
-after a Railway redeploy. Both addressed — see CURRENT STATE.
+Updated: 2026-08-21
 
-CURRENT STATE:
-Implementation complete and green. Root cause of symptom 1 was ONE path: the
-coin panel's "✏️ Set list" prompt called `settings.set_coins()`, so an admin
-monitoring BTC/ETH/SOL who answered "HYPE" was left monitoring only HYPE. Now
-additive (`add_coins`), button relabelled "➕ Add coins", prompt text says "add".
-Symptom 2 was mostly already correct (DB is authoritative, env seeds first boot
-only); hardened with a `bootstrapped_at` marker so an empty coin list is never
-re-seeded, plus a diff-based `CoinRepository.replace` so unrelated rows are not
-rewritten.
+---
 
-FILES CHANGED (this task):
-  app/services/settings_service.py   KEY_BOOTSTRAPPED, first_boot, last_coin_diff,
-                                     add_coins(), reset_to_defaults(),
-                                     decode_stored(); load() seeds only when the
-                                     marker is absent
-  app/database/repository.py         CoinRepository.replace -> diff, returns
-                                     (added, removed)
-  app/bot/handlers/prompts.py        kind == "coins" ADDS instead of replacing
-  app/bot/handlers/admin.py          cmd_config, cmd_resetsettings; setcoins /
-                                     addcoin report added vs removed
-  app/bot/handlers/callbacks.py      CB_RESET area, two-step coin clear
-                                     (clear -> clearyes), set:config
-  app/bot/keyboards/inline.py        CB_RESET, "➕ Add coins", confirm_clear_coins,
-                                     confirm_reset_settings, 🗄 Stored Configuration
-  app/bot/views.py                   config_view() reads the tables directly
-  app/bot/messages/texts.py          coins_added/coins_replaced/coins_cleared,
-                                     confirm_*, settings_reset, config_snapshot
-  app/services/admin_service.py      Capability.RESET_SETTINGS (main admin only)
-  app/container.py                   startup_summary()
-  app/main.py                        plain-text startup block + SQLite warning
-  app/bot/handlers/__init__.py       /config, /resetsettings
-  app/bot/commands.py                menu entries for both
-  tests/test_persistence.py          NEW — 29 tests
-  README.md                          "Persistence and settings safety" section
+## CURRENT TASK
 
-TESTS RUN:
-  ./.venv/Scripts/python.exe -m compileall -q app/ tests/
-  ./.venv/Scripts/python.exe -m pytest -q
+**VERIFIED EXECUTION + POSITION LIFECYCLE** (39-section spec, Tasks A–I).
+Worked as 10 checkpoints: 1 alert service · 2 /recent · 3 /whales ·
+4 summary separation · 5 order-alert toggle · 6 position lifecycle ·
+7 wallet formatting · 8 regression tests · 9 integration · 10 full suite.
 
-TEST RESULTS:
-  compileall: clean
-  pytest: 555 passed, 0 failed (was 526 before this task's tests)
-  tests/test_persistence.py: 29 passed
-  Mutation-checked: reverting prompts.py to set_coins() makes
-  test_the_add_coins_prompt_adds_instead_of_replacing fail with
-  ('HYPE',) != ('BTC','ETH','HYPE','SOL') — the exact reported bug.
+## CURRENT SUBTASK
 
-KNOWN ISSUES:
-- No new migration was needed: no new table or column. 0001_initial +
-  0002_alert_thread_key remain the whole history.
-- Deliberately NO UNIQUE constraint on whale_events.dedup_key. Trade identity
-  already includes the exchange tid; a hard UNIQUE would permanently block a
-  legitimate repeat of an identical position change ("do not over-deduplicate").
-  Non-unique index + 1h IDENTITY_TTL is the mechanism.
-- inline.alert_settings_panel still toggles `enable_order_detector` and has no
-  `enable_order_alerts` switch — a user-visible mismatch inherited from the
-  paused execution/lifecycle task, not from this one.
+None. Checkpoints 1–10 are complete; documentation is updated and the work is
+committed. What remains needs the deployed bot and is listed under
+USER-OWNED below.
 
-NEXT ACTION:
-Resume the paused 39-section "verified execution + position lifecycle" task:
-alert_service._render_trade relabelling (§4 format, footer 🐋 CLEXER WHALE
-MONITOR, 💰 Executed / 📦 Quantity, 🔎 VERIFIED EXECUTION), /recent + /whales
-filtered to EXECUTION_EVENTS, split EventRepository.summary metrics (§24),
-diagnostics counters (§25), the order-alerts toggle UI, then the 26 §31
-regression tests. Assertions to update when the format changes:
-tests/test_detector_liquidations.py:262,264 and
-tests/test_engine_pipeline.py:263,264,270,286,624.
+## STATUS
 
-RELEVANT TEST:
-./.venv/Scripts/python.exe -m pytest -q     -> 555 passed
+**All 10 checkpoints complete and green.**
+
+| # | Checkpoint | State |
+|---|---|---|
+| 1 | Alert service: FILLED/EXECUTED → trade alert; PLACED/RESTING/MODIFIED/CANCELLED → internal | done |
+| 2 | `/recent` shows verified executions only | done |
+| 3 | `/whales` wallet stats count executions only | done |
+| 4 | Summary metrics split: executed trades / order events / position events | done |
+| 5 | `enable_order_detector` (detection) split from `enable_order_alerts` (user-facing) | done |
+| 6 | Position lifecycle: SELL ≠ SHORT; zero → CLOSED from last non-zero snapshot | done |
+| 7 | Wallet address never truncated, always monospace, never in `callback_data` | done |
+| 8 | Regression tests (spec requirements 1–24) | done — 28 passed |
+| 9 | Full integration | done |
+| 10 | Complete test suite | done — 587 passed / 0 failed |
+
+## FILES BEING MODIFIED
+
+None mid-edit.
+
+## FILES ALREADY COMPLETED
+
+- `tests/test_verified_execution.py` — **new**, 28 tests, all passing.
+- `app/whale/detector.py` — two edits, now covered by the full suite:
+  - `_attach_position` (~L230) treats a *flat* snapshot like a missing one:
+    `position_value` / `entry_px` / `liquidation_px` / `leverage` become
+    `DataPoint.unavailable("no open position for this coin")`.
+  - `from_position_change` (~L713): `reference_entry` is only read from
+    `ctx.position` when that snapshot is not flat.
+- `app/services/alert_service.py` — execution vs order rendering; dead docstring
+  cross-reference fixed (`lifecycle.position_side` → `POSITION_SIDES`).
+- `app/whale/events.py`, `app/whale/filters.py`, `app/bot/views.py`,
+  `app/bot/messages/texts.py`, `app/bot/keyboards/inline.py`,
+  `app/bot/handlers/callbacks.py`, `app/database/repository.py`,
+  `app/hyperliquid/models.py` — checkpoints 1–7.
+- `.agent/TEST_STATUS.md`, `CHANGELOG.md`, `DECISIONS.md`, `PROJECT_STATE.md`,
+  `HANDOFF.md` — updated for this milestone.
+
+## TESTS PASSED
+
+- `./.venv/Scripts/python.exe -m pytest -q` → **587 passed in 49.82 s**
+  (2026-08-22). Per-module counts in `TEST_STATUS.md`.
+- `./.venv/Scripts/python.exe -m compileall -q app/ tests/` → clean.
+- `tests/test_verified_execution.py` alone → 28 passed.
+
+## TESTS FAILED
+
+None.
+
+## NEXT EXACT ACTION
+
+Nothing offline. The next actions belong to the user (see USER-OWNED); after the
+token is rotated and the bot redeploys, run the §33 six-step live scenario for
+`0x31dea2516beee92135b96f464eeec3cf292a13f2` and record any payload shape that
+differs from `API_NOTES.md`.
+
+## DO NOT START
+
+- **Persistence / settings work — COMPLETE and accepted (commit `6a0d677`).**
+- **Verified execution / position lifecycle — COMPLETE. Do not redo checkpoints 1–10.**
+- Do not create another Alembic migration. `0001_initial` + `0002_alert_thread_key`
+  are the migrations; the verified-execution work needed no schema change.
+- Do not add a UNIQUE constraint to `whale_events.dedup_key` — its absence is a
+  decision, so legitimate repeated position changes stay possible.
+- Do not redesign the settings system (key/value table is sufficient) or the
+  `bootstrapped_at` marker row.
+- Do not redo `.agent` memory or the Railway persistence implementation.
+- Never run `git reset --hard`, `git checkout .`, or `git clean -fd`.
+
+## BLOCKED BY
+
+Nothing.
+
+## NOT VERIFIED
+
+Live Railway behaviour. Nothing in this milestone was observed against the
+deployed bot — no live alert, no live redeploy log.
+
+## USER-OWNED (not mine to do)
+
+Rotate the exposed `BOT_TOKEN` via @BotFather `/revoke`, update the Railway
+variable, confirm the redeploy log and a live alert.

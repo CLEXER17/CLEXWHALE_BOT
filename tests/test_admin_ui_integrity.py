@@ -231,7 +231,9 @@ async def test_every_list_view_shows_the_complete_wallet_address(container, ctx,
 async def test_the_alert_body_shows_the_complete_wallet_address(container):
     """Issue 1: the alert itself, not only the list views."""
     rendered = container.alerts.render(trade_event())
-    assert f"👤 <b>Trader:</b> <code>{WALLET_A.lower()}</code>" in rendered
+    assert "👤 <b>Trader:</b>" in rendered
+    # On its own line, complete, in monospace (spec §4/§21).
+    assert f"\n<code>{WALLET_A.lower()}</code>" in rendered
 
 
 async def test_the_wallet_is_monospace_and_never_bold_instead(container, ctx, database):

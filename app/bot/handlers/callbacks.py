@@ -36,6 +36,7 @@ from app.services.settings_service import (
     KEY_ALL_COINS,
     KEY_BOOK,
     KEY_CANCELS,
+    KEY_ORDER_ALERTS,
     KEY_ORDERS,
     KEY_POSITIONS,
     KEY_TRADES,
@@ -77,8 +78,22 @@ _PAUSE_EXEMPT = frozenset(
 
 #: Booleans the 🔔 Alert Settings panel may flip. Monitoring and public mode are
 #: deliberately absent — they have their own capabilities and their own panels.
+#:
+#: ``KEY_ORDER_ALERTS`` is the resting-order row (Task E: the panel decides what is
+#: *sent*). ``KEY_ORDERS`` — internal order tracking — stays reachable here so the
+#: ``/set`` command can still turn tracking off, but it is not what the panel's
+#: order row flips: silencing order alerts must never disable the fill attribution
+#: the trade feed is built on.
 _ALERT_TOGGLES = frozenset(
-    {KEY_TRADES, KEY_POSITIONS, KEY_ORDERS, KEY_CANCELS, KEY_WALLETS, KEY_BOOK}
+    {
+        KEY_TRADES,
+        KEY_POSITIONS,
+        KEY_ORDERS,
+        KEY_ORDER_ALERTS,
+        KEY_CANCELS,
+        KEY_WALLETS,
+        KEY_BOOK,
+    }
 )
 
 

@@ -34,8 +34,15 @@ from app.database.repository import (
     WalletRepository,
 )
 from app.services.admin_service import Actor, ROLE_CO
-from app.services.settings_service import SettingsService
+from app.services.settings_service import RuntimeConfig, SettingsService
 from app.utils.formatting import utc_now
+from app.whale.events import (
+    BOOK_TYPE_NAMES,
+    EXECUTION_TYPE_NAMES,
+    FEED_TYPE_NAMES,
+    RESTING_ORDER_TYPE_NAMES,
+    summarize_events,
+)
 
 View = tuple[str, InlineKeyboardMarkup | None]
 
@@ -43,6 +50,23 @@ View = tuple[str, InlineKeyboardMarkup | None]
 #: the real constraint; these keep every view comfortably inside it.
 LIST_LIMIT = 8
 RECENT_WINDOW = timedelta(hours=24)
+
+
+def history_types(config: RuntimeConfig) -> list[str]:
+    """Which ``event_type`` rows the history commands may show.
+
+    Spec Task B/C: ``/recent`` and ``/whales`` are histories of *verified
+    executions* and verified position changes. A resting, modified or cancelled
+    order moved no coin, so it appears only when an administrator has explicitly
+    turned on order alerts — the same switch that lets those events reach the live
+    feed — and aggregate book levels only when the book scanner is on.
+    """
+    types = list(FEED_TYPE_NAMES)
+    if config.enable_order_alerts:
+        types.extend(RESTING_ORDER_TYPE_NAMES)
+        if config.enable_book_scanner:
+            types.extend(BOOK_TYPE_NAMES)
+    return types
 
 
 # ── entry points ───────────────────────────────────────────────
@@ -204,7 +228,8 @@ async def audit_view(container: AppContainer) -> View:
 async def stats_view(container: AppContainer, actor: Actor) -> View:
     async with container.db.session() as session:
         summary = await EventRepository.summary(session)
-    text = texts.statistics_panel(summary, container.stats())
+    # The repository counts rows; the whale layer decides which rows are trades.
+    text = texts.statistics_panel(summarize_events(summary), container.stats())
     return text, inline.stats_panel(admin=actor.is_admin)
 
 
@@ -218,7 +243,9 @@ async def diagnostics_view(container: AppContainer, actor: Actor) -> View:
 async def whales_view(container: AppContainer, actor: Actor, coin: str | None = None) -> View:
     config = container.settings.config
     async with container.db.session() as session:
-        rows = await EventRepository.recent(session, limit=LIST_LIMIT, coin=coin)
+        rows = await EventRepository.recent(
+            session, limit=LIST_LIMIT, coin=coin, event_types=history_types(config)
+        )
     return texts.whale_list(rows, config), inline.data_panel("whales", admin=actor.is_admin)
 
 
@@ -226,7 +253,10 @@ async def live_view(container: AppContainer, actor: Actor) -> View:
     config = container.settings.config
     async with container.db.session() as session:
         rows = await EventRepository.recent(
-            session, limit=LIST_LIMIT, since=utc_now() - RECENT_WINDOW
+            session,
+            limit=LIST_LIMIT,
+            since=utc_now() - RECENT_WINDOW,
+            event_types=history_types(config),
         )
     text = texts.live_signals(rows, config, container.engine.connected)
     return text, inline.data_panel("live", admin=actor.is_admin)
@@ -253,21 +283,18 @@ async def wallets_view(container: AppContainer, actor: Actor) -> View:
     live = [wallet.as_dict() for wallet in container.engine.tracker.top(limit=6)]
     if not live:
         # The in-memory tracker is empty right after a restart; fall back to the
-        # persisted totals so the view is not misleadingly blank.
+        # persisted history so the view is not misleadingly blank.
+        #
+        # Counted from ``whale_events`` filtered to executions, not from
+        # ``wallets.event_count``: that column counts every persisted event, so a
+        # wallet that placed and cancelled one order would otherwise be shown as
+        # having made two trades (Task C). "Trades" here means trades.
         async with container.db.session() as session:
-            rows = await WalletRepository.top(session, limit=6)
-        live = [
-            {
-                "address": row.address,
-                "trades": row.event_count,
-                "volume": row.total_notional,
-                "coins": sorted((row.coins or {}).keys())[:3],
-                # No "position_value" here: the persisted column is a historical
-                # maximum, not a live open position, and the two must not be
-                # rendered under the same label.
-            }
-            for row in rows
-        ]
+            live = await EventRepository.wallet_leaderboard(
+                session, EXECUTION_TYPE_NAMES, limit=6
+            )
+            # No "position_value": the persisted figure is a historical maximum,
+            # not a live open position, and the two must not share a label.
     text = texts.wallet_list(list(config.tracked_wallets), live)
     return text, inline.data_panel("wallets", admin=actor.is_admin)
 

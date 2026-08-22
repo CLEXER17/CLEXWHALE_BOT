@@ -225,3 +225,63 @@ where there is nothing to redact. Both formatters also route through
 `_safe_message()`, so a malformed third-party template degrades to a single line
 instead of a traceback per occurrence — logging must never be able to drown the
 signal it exists to carry.
+
+**DECISION:** An "execution" means a fill. `ORDER_PLACED`, `ORDER_MODIFIED` and
+`ORDER_CANCELLED` are never rendered as trades, and their value is labelled
+*intended*.
+**REASON:** A resting limit order moved no coin. Calling it a WHALE TRADE is a
+fabricated signal with a real number attached — the most damaging kind, because it
+is indistinguishable from a true one at a glance. `EXECUTION_TYPE_NAMES` /
+`RESTING_ORDER_TYPE_NAMES` in `app/whale/events.py` are the single place that
+distinction is spelled out; alerts, `/recent`, `/whales`, the wallet leaderboard
+and the statistics panel all read from them rather than repeating a type list.
+
+**DECISION:** Detection and publication are separate switches:
+`enable_order_detector` (default **on**) and `enable_order_alerts` (default
+**off**).
+**REASON:** Order state is a prerequisite for correct fill accounting — the
+executed size of a fill is derived from the previously seen resting size — so
+turning off the *noise* must not turn off the *tracking*. One flag conflated the
+two, meaning an admin who silenced order chatter also blinded the fill detector.
+Trade and position alerts default on; orders default off because they are the
+high-volume, low-information stream.
+
+**DECISION:** A fill's threshold is measured against `|price × executed_size|`,
+not the order's original notional.
+**REASON:** A 40-of-130 fill on a $95,000 limit is a $3.80M event, not a $12.35M
+one. `_as_execution` rewrites `notional` and flips `value_kind` to `TRADE_VALUE`
+so the trade minimum — not the order minimum — is the gate.
+
+**DECISION:** A position side is only ever read from a `clearinghouseState`
+snapshot. `Position.side` returns `None` when flat, and a flat snapshot is treated
+exactly like a missing one.
+**REASON:** `SELL` is not `SHORT`; it is equally the closing leg of a LONG.
+Inferring the side from the fill mislabels every closed LONG as a SHORT, and
+because Hyperliquid drops closed positions from `assetPositions`, a snapshot taken
+mid-close arrives with `szi == 0` — reading a side off *that* fails the same way.
+`_attach_position` therefore marks `position_value`, `entry_px`, `liquidation_px`
+and `leverage` as `unavailable("no open position for this coin")` for a flat
+snapshot rather than passing zeros along as data. A close reads its figures from
+the last non-zero snapshot instead.
+
+**DECISION:** `whale_events.dedup_key` keeps **no** UNIQUE constraint; identity is
+the exchange `tid` (or `oid` for order events) plus the `seen_recently` TTL.
+**REASON:** The TTL exists to absorb websocket reconnect replays, which is the
+only duplication actually observed. A UNIQUE index would additionally reject
+*legitimate* repeats — a wallet that genuinely increases the same position twice
+in the same way produces the same natural key — and a rejected insert is
+indistinguishable at the database layer from a suppressed duplicate. Silently
+losing a real event is worse than occasionally storing one twice, so the looser
+rule is the deliberate choice, not an oversight. Consequently no migration was
+needed for this milestone: `0001_initial` and `0002_alert_thread_key` remain the
+only migrations.
+
+**DECISION:** One fill is legitimately observed twice — once from the global
+`trades` feed as a `tid`-keyed `WHALE_TRADE`, once from `orderUpdates` as an
+`oid`-keyed `ORDER_FILLED`.
+**REASON:** The two feeds carry different information (the trades feed names both
+wallets; `orderUpdates` knows the resting size the fill consumed) and neither is
+derivable from the other. Collapsing them on a shared key would mean choosing
+which facts to discard. They are kept apart on purpose, and the statistics panel
+counts executions and order events on separate lines so the double observation
+cannot inflate a single "trades" figure.

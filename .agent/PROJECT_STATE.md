@@ -17,14 +17,16 @@ Phases 1–15 are implemented and verified. The repository is published at
 applied, `/health` up, Hyperliquid websocket connected, whale events detected.
 
 Work since then has been driven by defects reported from the live deployment
-rather than by the original spec phases. Latest completed: the **persistence +
-settings-safety fix** (34-section spec), which addressed two reported production
-symptoms — a settings change replacing unrelated settings, and configuration
-disappearing after a redeploy. Suite: **555 passed, 0 failed**.
+rather than by the original spec phases. Latest completed: the **verified
+execution + position lifecycle** work (39-section spec), which stopped the bot
+announcing a resting order as a whale trade and inferring a position side from a
+fill side. Before it, the **persistence + settings-safety fix** (34-section spec)
+addressed two reported production symptoms — a settings change replacing unrelated
+settings, and configuration disappearing after a redeploy. Suite: **587 passed, 0
+failed**.
 
-One task is paused mid-flight: the **verified execution + position lifecycle**
-work (39-section spec). Engine, detector and filter are done and committed;
-`alert_service` relabelling and its tests remain. See `NOW.md` and `HANDOFF.md`.
+No task is paused mid-flight. What remains needs the deployed bot: the §33 live
+six-step scenario, and token rotation. See `NOW.md` and `HANDOFF.md`.
 
 **Alert delivery has still not been confirmed live**; that needs a redeploy plus a
 whale above the threshold, and the token rotation below.
@@ -71,13 +73,20 @@ No credential exists in this repository and none may be added to it.
   `CoinRepository.replace`; `/config` reads the tables directly and flags drift;
   two-step 🧹 Clear and main-admin-only `/resetsettings`; `startup_summary()` plus
   the plain-text startup block. 29 new tests in `tests/test_persistence.py`
+- **Verified execution + position lifecycle (39-section spec).** A resting order
+  is never called a trade: executions (fills) are separated from order intentions
+  throughout alerts, `/recent`, `/whales`, the wallet leaderboard and the
+  statistics panel; `enable_order_detector` (tracking, on) split from
+  `enable_order_alerts` (publication, off); a fill's threshold measured against
+  the executed value; a position side read only from a `clearinghouseState`
+  snapshot, with a flat snapshot treated as no position and a close valued from
+  the last non-zero one. 28 new tests in `tests/test_verified_execution.py`
 
 ## CURRENTLY WORKING ON
 
-- Resuming the paused **verified execution + position lifecycle** task:
-  `alert_service._render_trade` to the §4 format, `/recent` + `/whales` filtered
-  to executions, split summary metrics, diagnostics counters, the
-  `enable_order_alerts` toggle UI, then the 26 §31 regression tests.
+- Nothing in progress. Full suite last measured **587 passed / 0 failed**
+  (2026-08-22). The next actions are live ones, listed below, and belong to the
+  user.
 
 ## NEXT TASK
 
@@ -190,7 +199,7 @@ rather than worked around with invented data.
 
 Authoritative detail in `.agent/TEST_STATUS.md`. Summary:
 
-- **TOTAL 555 · PASSED 555 · FAILED 0 · SKIPPED 0** (33.60 s)
+- **TOTAL 587 · PASSED 587 · FAILED 0 · SKIPPED 0** (49.82 s)
 - Run with `./.venv/Scripts/python.exe -m pytest -q`. The bare `python` on PATH
   is not the project interpreter and lacks `pytest_asyncio`.
 - Unit tests: all 16 items of the spec §36 list are covered; the mapping from

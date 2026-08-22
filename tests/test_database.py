@@ -42,6 +42,7 @@ from app.services.settings_service import (
     SettingsService,
 )
 from app.utils.formatting import utc_now
+from app.whale.events import EXECUTION_TYPE_NAMES, summarize_events
 from tests.conftest import (
     CO_ADMIN_ID,
     MAIN_ADMIN_ID,
@@ -665,12 +666,61 @@ async def test_the_summary_aggregates_what_the_panel_shows(database: Database):
     async with database.session() as session:
         summary = await EventRepository.summary(session)
     assert summary["total"] == 3
-    assert summary["longs"] == 2          # LONG + BUY
-    assert summary["shorts"] == 1
     assert summary["notional"] == 13_000_000.0
     assert summary["largest"] == 8_000_000.0
     assert summary["by_coin"][0] == {"coin": "BTC", "count": 2, "notional": 11_000_000.0}
     assert {item["type"] for item in summary["by_type"]} == {"WHALE_TRADE", "ORDER_PLACED"}
+    # The repository draws no conclusions about which rows are trades; it reports
+    # the grouped facts the whale layer needs to split them.
+    assert {(r["type"], r["side"], r["count"]) for r in summary["by_type_side"]} == {
+        ("WHALE_TRADE", "LONG", 1),
+        ("WHALE_TRADE", "SHORT", 1),
+        ("ORDER_PLACED", "BUY", 1),
+    }
+
+
+async def test_the_split_counts_executions_apart_from_order_events(database: Database):
+    """Task D — a placed order is not a trade, and never joins the trade totals."""
+    async with database.session() as session:
+        await EventRepository.insert(
+            session, **event_row(dedup_key="a", notional=3_000_000.0, side="BUY", coin="BTC")
+        )
+        await EventRepository.insert(
+            session,
+            **event_row(
+                dedup_key="b",
+                notional=9_000_000.0,
+                side="SELL",
+                coin="BTC",
+                event_type="ORDER_PLACED",
+            ),
+        )
+        await EventRepository.insert(
+            session,
+            **event_row(
+                dedup_key="c",
+                notional=4_000_000.0,
+                side="LONG",
+                coin="ETH",
+                event_type="POSITION_OPENED",
+            ),
+        )
+    async with database.session() as session:
+        split = summarize_events(await EventRepository.summary(session))
+
+    assert split["executions"] == 1
+    assert split["execution_notional"] == 3_000_000.0
+    assert split["largest_execution"] == 3_000_000.0
+    assert split["order_events"] == 1
+    assert split["order_notional"] == 9_000_000.0
+    assert split["position_events"] == 1
+    # The $9M *intended* by the resting order is nowhere in the executed figures.
+    assert split["execution_notional"] != split["notional"]
+    # BUY/SELL counts executions; LONG/SHORT counts verified positions. The resting
+    # SELL is an intention and appears in neither.
+    assert (split["buys"], split["sells"]) == (1, 0)
+    assert (split["longs"], split["shorts"]) == (1, 0)
+    assert split["total"] == 3
 
 
 async def test_an_empty_summary_returns_zeros_not_none(database: Database):
@@ -680,6 +730,58 @@ async def test_an_empty_summary_returns_zeros_not_none(database: Database):
     assert summary["notional"] == 0.0
     assert summary["largest"] == 0.0
     assert summary["by_coin"] == []
+    assert summary["by_type_side"] == []
+    split = summarize_events(summary)
+    assert (split["executions"], split["order_events"], split["position_events"]) == (0, 0, 0)
+    assert split["execution_notional"] == 0.0
+
+
+async def test_the_wallet_leaderboard_counts_executions_not_order_churn(database: Database):
+    """Task C — a wallet that places and cancels an order has made no trades."""
+    async with database.session() as session:
+        # WALLET_A: one $3M execution, plus a placed-then-cancelled $50M order.
+        await EventRepository.insert(
+            session, **event_row(dedup_key="a1", wallet=WALLET_A, notional=3_000_000.0, coin="BTC")
+        )
+        for index, event_type in enumerate(("ORDER_PLACED", "ORDER_CANCELLED")):
+            await EventRepository.insert(
+                session,
+                **event_row(
+                    dedup_key=f"a-order-{index}",
+                    wallet=WALLET_A,
+                    notional=50_000_000.0,
+                    coin="BTC",
+                    event_type=event_type,
+                ),
+            )
+        # WALLET_B: two real executions worth $6M.
+        for index in range(2):
+            await EventRepository.insert(
+                session,
+                **event_row(
+                    dedup_key=f"b{index}",
+                    wallet=WALLET_B,
+                    notional=3_000_000.0,
+                    coin="ETH",
+                ),
+            )
+    async with database.session() as session:
+        board = await EventRepository.wallet_leaderboard(session, EXECUTION_TYPE_NAMES)
+
+    by_wallet = {entry["address"]: entry for entry in board}
+    assert by_wallet[WALLET_A.lower()]["trades"] == 1
+    assert by_wallet[WALLET_A.lower()]["volume"] == 3_000_000.0
+    assert by_wallet[WALLET_B.lower()]["trades"] == 2
+    # Executed volume ranks the board, so the order churn does not put A on top.
+    assert board[0]["address"] == WALLET_B.lower()
+    assert by_wallet[WALLET_A.lower()]["coins"] == ["BTC"]
+    # Addresses are stored and returned in full — never a prefix.
+    assert all(len(entry["address"]) == 42 for entry in board)
+
+
+async def test_the_wallet_leaderboard_is_empty_without_types(database: Database):
+    async with database.session() as session:
+        assert await EventRepository.wallet_leaderboard(session, []) == []
 
 
 async def test_pruning_deletes_only_the_old_rows(database: Database):

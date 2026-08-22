@@ -416,28 +416,22 @@ class EventRepository:
 
     @staticmethod
     async def summary(session: AsyncSession, since: datetime | None = None) -> dict[str, Any]:
+        """Raw aggregates over ``whale_events``.
+
+        Deliberately reports *facts about rows* and draws no conclusions: it does
+        not decide which event types count as trades, because that is the whale
+        layer's definition (:data:`app.whale.events.EXECUTION_EVENTS`) and this
+        module may not import it — ``app.whale`` imports ``app.database``, so the
+        dependency runs one way only. ``by_type_side`` carries everything needed
+        for the split; :func:`app.whale.events.summarize_events` applies it.
+        """
+
         def scope(stmt: Any) -> Any:
             return stmt.where(WhaleEvent.event_time >= since) if since is not None else stmt
 
         total = int(await session.scalar(scope(select(func.count()).select_from(WhaleEvent))) or 0)
         notional = float(await session.scalar(scope(select(func.sum(WhaleEvent.notional)))) or 0.0)
         largest = float(await session.scalar(scope(select(func.max(WhaleEvent.notional)))) or 0.0)
-        longs = int(
-            await session.scalar(
-                scope(select(func.count()).select_from(WhaleEvent)).where(
-                    WhaleEvent.side.in_(["LONG", "BUY"])
-                )
-            )
-            or 0
-        )
-        shorts = int(
-            await session.scalar(
-                scope(select(func.count()).select_from(WhaleEvent)).where(
-                    WhaleEvent.side.in_(["SHORT", "SELL"])
-                )
-            )
-            or 0
-        )
         by_coin = (
             await session.execute(
                 scope(
@@ -455,17 +449,104 @@ class EventRepository:
                 .order_by(func.count().desc())
             )
         ).all()
+        # One grouped read is enough for every per-category figure the panels show.
+        by_type_side = (
+            await session.execute(
+                scope(
+                    select(
+                        WhaleEvent.event_type,
+                        WhaleEvent.side,
+                        func.count(),
+                        func.sum(WhaleEvent.notional),
+                        func.max(WhaleEvent.notional),
+                    )
+                ).group_by(WhaleEvent.event_type, WhaleEvent.side)
+            )
+        ).all()
         return {
             "total": total,
-            "longs": longs,
-            "shorts": shorts,
             "notional": notional,
             "largest": largest,
             "by_coin": [
                 {"coin": c, "count": int(n), "notional": float(v or 0)} for c, n, v in by_coin
             ],
             "by_type": [{"type": t, "count": int(n)} for t, n in by_type],
+            "by_type_side": [
+                {
+                    "type": t,
+                    "side": s,
+                    "count": int(n),
+                    "notional": float(v or 0.0),
+                    "largest": float(m or 0.0),
+                }
+                for t, s, n, v, m in by_type_side
+            ],
         }
+
+    @staticmethod
+    async def wallet_leaderboard(
+        session: AsyncSession,
+        event_types: Sequence[str],
+        limit: int = 10,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-wallet activity restricted to the given event types.
+
+        The ``wallets`` table counts *every* persisted event for an address, which
+        is the right meaning for "how much have we seen from this wallet" but the
+        wrong one for a trade leaderboard: a whale who places and cancels the same
+        order fifty times has made no trades. Counting rows in ``whale_events``
+        filtered to the caller's types keeps "trades" meaning executions without a
+        second set of columns to keep in step.
+        """
+        types = list(event_types)
+        if not types:
+            return []
+
+        def scope(stmt: Any) -> Any:
+            stmt = stmt.where(WhaleEvent.wallet.is_not(None), WhaleEvent.event_type.in_(types))
+            return stmt.where(WhaleEvent.event_time >= since) if since is not None else stmt
+
+        rows = (
+            await session.execute(
+                scope(
+                    select(
+                        WhaleEvent.wallet,
+                        func.count(),
+                        func.sum(WhaleEvent.notional),
+                        func.max(WhaleEvent.notional),
+                    )
+                )
+                .group_by(WhaleEvent.wallet)
+                .order_by(func.sum(WhaleEvent.notional).desc())
+                .limit(limit)
+            )
+        ).all()
+        if not rows:
+            return []
+
+        wallets = [row[0] for row in rows]
+        coin_rows = (
+            await session.execute(
+                scope(select(WhaleEvent.wallet, WhaleEvent.coin, func.sum(WhaleEvent.notional)))
+                .where(WhaleEvent.wallet.in_(wallets))
+                .group_by(WhaleEvent.wallet, WhaleEvent.coin)
+                .order_by(func.sum(WhaleEvent.notional).desc())
+            )
+        ).all()
+        coins: dict[str, list[str]] = {}
+        for wallet, coin, _value in coin_rows:
+            coins.setdefault(wallet, []).append(coin)
+        return [
+            {
+                "address": wallet,
+                "trades": int(count),
+                "volume": float(volume or 0.0),
+                "largest_trade": float(largest or 0.0),
+                "coins": coins.get(wallet, [])[:3],
+            }
+            for wallet, count, volume, largest in rows
+        ]
 
     @staticmethod
     async def prune(session: AsyncSession, older_than: datetime) -> int:

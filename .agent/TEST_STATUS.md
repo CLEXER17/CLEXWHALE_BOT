@@ -19,41 +19,40 @@ required.
 
 | | |
 |---|---|
-| **TOTAL** | **555** |
-| **PASSED** | **555** |
+| **TOTAL** | **587** |
+| **PASSED** | **587** |
 | **FAILED** | **0** |
 | **SKIPPED** | **0** |
 | xfailed / errors | 0 |
-| Wall time | 33.60 s |
+| Wall time | 49.82 s |
 
-## Per module (each run on its own)
+## Per module (counts collected from the same run)
 
-| Module | Tests | Result | Time |
-|---|---|---|---|
-| `tests/test_admin_ui_integrity.py` | 32 | 32 passed | 1.84 s |
-| `tests/test_bot_application.py` | 7 | 7 passed | 2.13 s |
-| `tests/test_config.py` | 34 | 34 passed | 0.09 s |
-| `tests/test_database.py` | 68 | 68 passed | 2.98 s |
-| `tests/test_dedup.py` | 27 | 27 passed | 0.12 s |
-| `tests/test_detector_liquidations.py` | 30 | 30 passed | 0.08 s |
-| `tests/test_detector_orders.py` | 23 | 23 passed | 0.05 s |
-| `tests/test_detector_positions.py` | 23 | 23 passed | 0.05 s |
-| `tests/test_detector_trades.py` | 17 | 17 passed | 0.05 s |
-| `tests/test_engine_pipeline.py` | 33 | 33 passed | 10.09 s |
-| `tests/test_filters.py` | 33 | 33 passed | 0.05 s |
-| `tests/test_global_pause.py` | 15 | 15 passed | 1.20 s |
-| `tests/test_order_position_separation.py` | 20 | 20 passed | 0.05 s |
-| `tests/test_permissions.py` | 48 | 48 passed | 3.51 s |
-| `tests/test_persistence.py` | 29 | 29 passed | 2.97 s |
-| `tests/test_resilience.py` | 50 | 50 passed | 5.57 s |
-| `tests/test_telegram_handlers.py` | 66 | 66 passed | 6.94 s |
+| Module | Tests | Result |
+|---|---|---|
+| `tests/test_admin_ui_integrity.py` | 32 | passed |
+| `tests/test_bot_application.py` | 7 | passed |
+| `tests/test_config.py` | 34 | passed |
+| `tests/test_database.py` | 71 | passed |
+| `tests/test_dedup.py` | 27 | passed |
+| `tests/test_detector_liquidations.py` | 30 | passed |
+| `tests/test_detector_orders.py` | 23 | passed |
+| `tests/test_detector_positions.py` | 23 | passed |
+| `tests/test_detector_trades.py` | 17 | passed |
+| `tests/test_engine_pipeline.py` | 33 | passed |
+| `tests/test_filters.py` | 33 | passed |
+| `tests/test_global_pause.py` | 15 | passed |
+| `tests/test_order_position_separation.py` | 20 | passed |
+| `tests/test_permissions.py` | 48 | passed |
+| `tests/test_persistence.py` | 29 | passed |
+| `tests/test_resilience.py` | 50 | passed |
+| `tests/test_telegram_handlers.py` | 67 | passed |
+| `tests/test_verified_execution.py` | 28 | passed |
 
-The per-module times sum to more than the full-suite wall time because each row
-pays its own interpreter and fixture start-up. The wall time is also not stable
-on Windows: the same suite took 396 s immediately after `compileall` rewrote
-every `.pyc`, and 28.55 s on the next run, so treat a slow run as an
-antivirus/filesystem artefact rather than a regression — the pass count is the
-signal.
+The wall time is not stable on Windows: the same suite took 396 s immediately
+after `compileall` rewrote every `.pyc`, and 28.55 s on the next run, so treat a
+slow run as an antivirus/filesystem artefact rather than a regression — the pass
+count is the signal.
 
 Support files (no tests of their own): `tests/conftest.py` (fixtures, fake
 Telegram objects, environment scrubbing), `tests/factories.py` (builders for
@@ -81,7 +80,7 @@ Hyperliquid shapes).
 | Invalid command input | `test_telegram_handlers.py`, `test_config.py` |
 | Unauthorized user rejection | `test_permissions.py`, `test_telegram_handlers.py` |
 | Unit tests | all modules |
-| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py`, `test_bot_application.py`, `test_persistence.py` |
+| Integration tests | `test_database.py`, `test_resilience.py`, `test_engine_pipeline.py`, `test_telegram_handlers.py`, `test_bot_application.py`, `test_persistence.py`, `test_verified_execution.py` |
 
 ## What the end-to-end pipeline test actually asserts
 
@@ -149,6 +148,36 @@ The suite was mutation-checked against the actual bug: reverting the coins promp
 to `set_coins()` makes
 `test_the_add_coins_prompt_adds_instead_of_replacing` fail with
 `('HYPE',) != ('BTC', 'ETH', 'HYPE', 'SOL')` — the exact reported symptom.
+
+## Beyond §36: verified execution and position lifecycle
+
+`tests/test_verified_execution.py` (28 tests) is the regression suite for the
+"VERIFIED EXECUTION + POSITION LIFECYCLE" spec. Its subject is a single
+distinction: **a resting order is not a trade.** An order that sits in the book,
+is modified, or is cancelled moved no coin, and the suite asserts that nothing in
+the system — alert, feed, leaderboard, or counter — calls it one. Numbered by the
+spec requirement each test pins.
+
+| Requirement | What it asserts |
+|---|---|
+| 1–3 | `ORDER_PLACED` and `ORDER_CANCELLED` never render a trade alert (they carry the order headline and an `intended` value); `ORDER_FILLED` does, priced off the executed size |
+| 4–5 | one execution alerts once; a *second genuine* execution is not swallowed by the first, and a repeated position change stays possible |
+| 6 | a fill's `BUY`/`SELL` never becomes a position side — a `SELL` with no snapshot writes no `positions` row at all, and a `SELL` carrying a verified LONG snapshot writes `LONG` |
+| 7–12 | the lifecycle: open, increase by the delta, a `SELL` that trims a LONG stays LONG, a `BUY` that trims a SHORT stays SHORT, zero → `POSITION_CLOSED`, and a close reads its figures from the last non-zero snapshot |
+| 13–14 | `/recent` and `/whales` list executions only; the wallet leaderboard counts executions, so a wallet that placed and cancelled an order has made no trades |
+| 15–16 | the order-alert switch: with `enable_order_alerts` on, resting orders reach the feed and the histories; with it off, `enable_order_detector` still tracks them internally |
+| 17–18 | the trade threshold and the coin filter are applied to the **executed** value, not the order's original notional |
+| 19–20 | the canonical address survives every formatter, is always monospace, and never appears in a `callback_data` payload |
+| 21 | executed trades, order events and position events are counted apart; `$186.00M` of intended order value is reported on the order line and never as trade notional |
+| 22–24 | the main admin and a co-admin may flip the order-alert switch; an ordinary user may not, and a switch outside the whitelist is refused even to the main admin |
+
+Requirements 25–26 are statements about the suite as a whole ("all previous tests
+still pass", "the complete suite is green") and are answered by the totals above.
+
+Delivery is asserted through the real `AlertService`: `attach_bot(FakeBot())`,
+`start()`, `engine._emit(event)`, `await alerts._queue.join()`, then read
+`bot.messages`. Joining the queue is exact — polling with `asyncio.sleep(0)` does
+not reliably advance aiosqlite's thread I/O and produced a flaky first draft.
 
 ## Defects this suite found (fixed)
 

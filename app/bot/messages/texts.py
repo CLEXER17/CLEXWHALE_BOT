@@ -598,10 +598,11 @@ def settings_panel(config: RuntimeConfig) -> str:
 
 
 def alert_settings(config: RuntimeConfig) -> str:
+    """Task E — the panel lists what is *sent*, in the same order as the buttons."""
     rows = [
         ("Large trades", config.enable_trade_detector),
         ("Position changes", config.enable_position_detector),
-        ("Resting orders", config.enable_order_detector),
+        ("Resting order alerts", config.enable_order_alerts),
         ("Order cancellations", config.enable_order_cancel_alerts),
         ("Wallet tracking", config.enable_wallet_tracking),
         ("Order book levels", config.enable_book_scanner),
@@ -610,36 +611,63 @@ def alert_settings(config: RuntimeConfig) -> str:
     lines += [f"{'🟢' if value else '🔴'} {label}" for label, value in rows]
     lines += [
         DIVIDER,
-        "<i>Order book levels are aggregated by Hyperliquid and carry no wallet",
+        # Saying this plainly is the point of Task E: an administrator who turns
+        # resting-order alerts off should not wonder whether they have just blinded
+        # the trade feed, and one who leaves them off should know fills still arrive.
+        "<i>Executed trades and position changes always alert when enabled above.",
+        f"Resting-order alerts are {'ON' if config.enable_order_alerts else 'OFF'}:"
+        " placed, modified and cancelled orders are intentions, not trades.",
+        f"Order tracking itself is {'ON' if config.enable_order_detector else 'OFF'}"
+        " — it stays on to attribute fills and read TP/SL, and sends nothing.",
+        "Order book levels are aggregated by Hyperliquid and carry no wallet",
         "address, so those alerts never name a trader.</i>",
     ]
     return "\n".join(lines)
 
 
 def _detector_summary(config: RuntimeConfig) -> str:
+    """How many *alert* streams are on — the switches the panel shows."""
     enabled = sum(
         (
             config.enable_trade_detector,
             config.enable_position_detector,
-            config.enable_order_detector,
+            config.enable_order_alerts,
             config.enable_order_cancel_alerts,
             config.enable_book_scanner,
         )
     )
-    return f"{enabled}/5 detectors on"
+    return f"{enabled}/5 alerts on"
 
 
 # ── statistics (spec §32) ──────────────────────────────────────
 def statistics_panel(summary: Mapping[str, Any], stats: Mapping[str, Any]) -> str:
+    """Spec Task D — executions, order events and position events are separate.
+
+    ``summary`` is expected to have been through
+    :func:`app.whale.events.summarize_events`. The one thing this panel must never
+    do is print a single "trades" figure that includes orders: an order that was
+    placed and cancelled moved no money, and a reader who sees it counted as a
+    trade has been told something false. So the executed figures lead, and the
+    order and position counts are labelled for what they are.
+    """
     engine = stats.get("engine") or {}
     lines = [
         "📊 <b>SYSTEM STATISTICS</b>",
         DIVIDER,
-        f"<b>Whale Events:</b> {summary.get('total', 0):,}",
-        f"<b>LONG:</b> {summary.get('longs', 0):,}",
-        f"<b>SHORT:</b> {summary.get('shorts', 0):,}",
-        f"<b>Total Notional:</b> {fmt_usd(summary.get('notional'))}",
-        f"<b>Largest Event:</b> {fmt_usd(summary.get('largest'))}",
+        f"<b>Executed Trades:</b> {int(summary.get('executions', 0) or 0):,}",
+        f"<b>Trade Notional:</b> {fmt_usd(summary.get('execution_notional'))}",
+        f"<b>Largest Trade:</b> {fmt_usd(summary.get('largest_execution'))}",
+        f"<b>Position Events:</b> {int(summary.get('position_events', 0) or 0):,}",
+        f"<b>Order Events:</b> {int(summary.get('order_events', 0) or 0):,}"
+        + f" · {fmt_usd(summary.get('order_notional'))} intended",
+        DIVIDER,
+        # BUY/SELL is how an execution crossed the book; LONG/SHORT is which way a
+        # verified position points. Two different questions, two different lines.
+        f"<b>Executions:</b> 🟢 {int(summary.get('buys', 0) or 0):,} BUY"
+        f" · 🔴 {int(summary.get('sells', 0) or 0):,} SELL",
+        f"<b>Positions:</b> 📈 {int(summary.get('longs', 0) or 0):,} LONG"
+        f" · 📉 {int(summary.get('shorts', 0) or 0):,} SHORT",
+        f"<b>Events Recorded:</b> {int(summary.get('total', 0) or 0):,}",
     ]
 
     by_coin: Sequence[Mapping[str, Any]] = summary.get("by_coin") or []
@@ -665,7 +693,10 @@ def statistics_panel(summary: Mapping[str, Any], stats: Mapping[str, Any]) -> st
     lines += [
         DIVIDER,
         f"<b>Uptime:</b> {fmt_duration(stats.get('uptime_seconds') or 0)}",
-        f"Trades observed: {engine.get('trades_seen', 0):,}",
+        # "Trades seen" is every trade on the public feed, whale-sized or not, and
+        # is not a count of alerts. Naming the two separately keeps the distinction.
+        f"Feed trades seen: {engine.get('trades_seen', 0):,}",
+        f"Verified executions: {engine.get('executions_verified', 0):,}",
         f"Alerts delivered: {(stats.get('alerts') or {}).get('sent', 0):,}",
     ]
     window = summary.get("window_label")
@@ -1182,7 +1213,8 @@ def config_snapshot(
         f" · Paused: <b>{'YES' if values.get('paused') else 'no'}</b>",
         f"🔔 Trades: <b>{stored_bool('enable_trade_detector', True)}</b>"
         f" · Positions: <b>{stored_bool('enable_position_detector', True)}</b>"
-        f" · Orders: <b>{stored_bool('enable_order_alerts', False)}</b>",
+        f" · Order alerts: <b>{stored_bool('enable_order_alerts', False)}</b>",
+        f"🔍 Order tracking (internal): <b>{stored_bool('enable_order_detector', True)}</b>",
         f"👑 Admins: <b>{len(main)}</b> main, <b>{len(co)}</b> co-admin",
         f"👛 Watched wallets: <b>{len(wallets)}</b>",
         f"👥 Alert subscribers: <b>{subscribers}</b>",

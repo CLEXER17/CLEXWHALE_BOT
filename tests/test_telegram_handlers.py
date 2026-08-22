@@ -213,9 +213,41 @@ async def test_only_whitelisted_switches_can_be_toggled(container, ctx):
     assert container.settings.config.public_mode is False
     assert "not available here" in update.callback_query.alerts[0]
 
-    ok = FakeUpdate(MAIN_ADMIN_ID, callback_data="set:toggle:enable_order_detector")
+    ok = FakeUpdate(MAIN_ADMIN_ID, callback_data="set:toggle:enable_order_alerts")
     await on_callback(ok, ctx)
-    assert container.settings.config.enable_order_detector is False
+    assert container.settings.config.enable_order_alerts is True
+
+
+async def test_the_order_row_toggles_alerts_and_leaves_tracking_alone(container, ctx):
+    """Task E — the panel's resting-order row is ``enable_order_alerts``.
+
+    The mismatch this replaces: the button flipped ``enable_order_detector``, so an
+    administrator who wanted the order *alerts* silenced also switched off the
+    tracking that attributes fills and reads TP/SL. Detection is internal; alerting
+    is the user-facing choice, and only the latter is on this keyboard.
+    """
+    keyboard = inline.alert_settings_panel(container.settings.config)
+    order_rows = [
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if "order" in button.text.lower() and "cancel" not in button.text.lower()
+    ]
+    assert [button.callback_data for button in order_rows] == [
+        "set:toggle:enable_order_alerts",
+        "set:toggle:enable_book_scanner",
+    ]
+    # Default: alerts off, tracking on.
+    assert container.settings.config.enable_order_alerts is False
+    assert container.settings.config.enable_order_detector is True
+
+    await on_callback(FakeUpdate(MAIN_ADMIN_ID, callback_data=order_rows[0].callback_data), ctx)
+    assert container.settings.config.enable_order_alerts is True
+    assert container.settings.config.enable_order_detector is True    # untouched
+
+    await on_callback(FakeUpdate(MAIN_ADMIN_ID, callback_data=order_rows[0].callback_data), ctx)
+    assert container.settings.config.enable_order_alerts is False
+    assert container.settings.config.enable_order_detector is True
 
 
 async def test_cancel_clears_a_pending_prompt(container, ctx):
