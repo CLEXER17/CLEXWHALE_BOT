@@ -23,7 +23,7 @@ BLOCKED BY.
 |---|---|---|
 | 1 | Read current state (`NOW.md`, `git status`, `git diff --stat`) | done — clean at `d0194d7` |
 | 2 | Configuration audit: required vars, no hardcoded credentials, `.env` ignored, migrations on boot, healthcheck, single replica | **PASS** (offline) |
-| 2 | Token rotation actually performed | **NOT VERIFIED** — only @BotFather can confirm |
+| 2 | Token rotation | **done** — user confirmed the exposed `BOT_TOKEN` was revoked via @BotFather and replaced (2026-08-22). The new value lives only in the Railway dashboard. |
 | 3–12 | Startup, persistence, execution, lifecycle, wallet, toggle, permissions, co-admin, `/recent`, `/whales` | **NOT VERIFIED** — blocked |
 
 ## FILES BEING MODIFIED
@@ -66,20 +66,21 @@ stranger) and real Hyperliquid fills arriving live. An agent cannot supply those
 
 ## NEXT EXACT ACTION
 
-Waiting on the user for one decision: **which Railway project/service should host
-`CLEXER17/CLEXWHALE_BOT`** — a new service in the empty `devoted-unity`, a new
-service in `noble-creation` alongside the existing Postgres, or a deploy the user
-performs themselves in an account this CLI cannot see.
+**Decided 2026-08-22: the user deploys the service themselves.** Nothing for an
+agent to do until the startup log comes back.
 
-Once a service exists with `BOT_TOKEN`, `MAIN_ADMIN_ID` and
-`DATABASE_URL = ${{Postgres.DATABASE_URL}}`:
+When it does:
 
-1. `railway logs --service <name> | tail -60` → confirm
+1. Read the pasted log against `app/main.py:198-207` — confirm
    `Database ......... CONNECTED (postgresql, durable)` and
    `Configuration .... LOADED from database`, no reconnect loop, no
    `Alert dropped: Telegram bot not attached yet`.
-2. Work through `.agent/LIVE_VERIFICATION.md` steps 4–12, filling the evidence
-   table. `NOT VERIFIED` is a valid answer; never record `PASS` without output.
+2. Work through `.agent/LIVE_VERIFICATION.md` steps 4–12 against the evidence the
+   user captures. `NOT VERIFIED` is a valid answer; never record `PASS` without
+   output.
+3. On a failure: record all eight facts, find the smallest responsible function,
+   fix only that, add a regression test that fails against the current code, run
+   focused tests, then the full suite.
 
 ## DO NOT START
 
@@ -101,6 +102,9 @@ formatting on a real screen. No deployment was observed.
 
 ## USER-OWNED (not mine to do)
 
-1. Confirm the exposed `BOT_TOKEN` was revoked via @BotFather `/revoke`.
-2. Create/point the Railway service and set its variables in the dashboard.
-3. Drive the Telegram steps from three accounts and capture the evidence.
+1. ~~Revoke the exposed `BOT_TOKEN`~~ — **done**, confirmed 2026-08-22.
+2. Create the Railway service for `CLEXER17/CLEXWHALE_BOT` and set `BOT_TOKEN`,
+   `MAIN_ADMIN_ID` and `DATABASE_URL = ${{Postgres.DATABASE_URL}}` in the
+   dashboard. Deploy commit `d0194d7` or later.
+3. Paste back the startup block, then drive the Telegram steps from three accounts
+   (main admin, co-admin, stranger) and capture the evidence table.

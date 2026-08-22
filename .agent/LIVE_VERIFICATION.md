@@ -44,7 +44,7 @@ a commit, or this file.
 | Migrations run on boot | **PASS** — `railway.toml` `startCommand = "python -m app.main"`; migrations run inside `app.main` before anything touches the schema. |
 | Healthcheck | **PASS** — `healthcheckPath = "/health"`, 120 s timeout; 200 for healthy *and* degraded, 503 only when the database is unreachable. |
 | Single replica | **PASS** — `numReplicas = 1`; a second replica would double every alert. |
-| **Token rotation** | **NOT VERIFIED** — an agent cannot tell whether the exposed token was revoked. Only @BotFather knows. Confirm it yourself before Step 3. |
+| **Token rotation** | **done** — the user confirmed on 2026-08-22 that the exposed token was revoked via @BotFather and replaced. The new value lives only in the Railway dashboard. |
 
 ### Variables the service must have
 
