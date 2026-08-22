@@ -523,7 +523,9 @@ async def test_a_duplicate_that_outlived_the_memory_cache_is_still_suppressed(
 
 def test_a_4_60m_order_is_excluded_at_a_5m_threshold():
     """Issue 7: the reported "$5,000,000" heading over a $4.60M row."""
-    config = RuntimeConfig(all_coins=True, min_whale_value=5_000_000.0)
+    config = RuntimeConfig(
+        all_coins=True, min_whale_value=5_000_000.0, enable_order_alerts=True
+    )
     result = make_filter(config).evaluate(order_event(oid=1, notional=4_600_000.0), config)
     assert result.accepted is False
     assert result.reason == REASON_THRESHOLD
@@ -532,7 +534,9 @@ def test_a_4_60m_order_is_excluded_at_a_5m_threshold():
 
 def test_exactly_5m_passes_because_the_configured_gate_is_inclusive():
     """Issue 7: the boundary follows the implemented ``>=``, and it is stated."""
-    config = RuntimeConfig(all_coins=True, min_whale_value=5_000_000.0)
+    config = RuntimeConfig(
+        all_coins=True, min_whale_value=5_000_000.0, enable_order_alerts=True
+    )
     result = make_filter(config).evaluate(order_event(oid=1, notional=5_000_000.0), config)
     assert result.accepted is True
     assert result.reason == REASON_OK

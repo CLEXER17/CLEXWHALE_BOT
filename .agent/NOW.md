@@ -1,39 +1,49 @@
 # NOW
 
 CURRENT TASK:
-Task B (admin UI + wallet display + data integrity, 17 issues) and Task C
-(global /pause + /go) are both complete, tested and green. Nothing is in flight.
+Verified execution + position lifecycle (39-section spec). The primary Telegram
+feed must carry EXECUTIONS ONLY. Order placed/resting/modified/cancelled become
+internal tracking; ORDER FILLED / EXECUTED becomes the user-facing WHALE TRADE.
 
 CURRENT FILE:
-none — last touched app/bot/commands.py (PUBLIC_COMMAND_MENU) and the two new
-test files.
+app/services/settings_service.py (adding enable_order_alerts)
 
 CURRENT FUNCTION:
-none.
+RuntimeConfig / SettingsService._build
 
 LAST COMPLETED:
-The 18+ named regression tests: tests/test_admin_ui_integrity.py (32 tests,
-issues 1-14) and tests/test_global_pause.py (15 tests, Task C). They caught one
-real bug: /recent was published in the admin command scope while its handler
-required only VIEW_WHALES and /help advertised it publicly — fixed by moving
-`recent` into PUBLIC_COMMAND_MENU in app/bot/commands.py. Docs updated:
-.agent/TEST_STATUS.md (474 totals, per-module table, defect 4) and
-.agent/CHANGELOG.md (new top entry). Committed and pushed.
+Reconnaissance of engine.py, settings_service.py, dedup.py, detector.py,
+alert_service.py, views.py, handlers/data.py, EventRepository. Liquidation work
+(items 3 + 5) committed and pushed as 8d48846.
+
+DECISION (settled, implement as written):
+1 WHALE_TRADE is *additionally* sourced from userEvents fills — not replaced.
+  The public `trades` feed already reports executions, so it is already verified
+  and only needs relabelling; fills add order-ID/fill-ID anchored executions.
+2 identity_key for WHALE_TRADE is ("trade", tid, role) already, so a fill sets
+  context["role"] = "taker" if fill.crossed else "maker" and one execution seen
+  on both feeds alerts exactly once (§7 one alert per delivery, §30 no
+  over-dedup).
+3 enable_order_detector KEEPS its meaning = INTERNAL order tracking (default
+  True, required by §27 and by the focus slate that also carries fills). A NEW
+  enable_order_alerts (default False) gates user-facing order events in the
+  filter with reason REASON_ORDER_ALERTS_OFF. Defaults: TRADE ON, ORDER OFF,
+  POSITION ON.
+4 Deviation to disclose in the §39 report: §4's example trade block shows no
+  position-enrichment lines; keeping verified enrichment (TP/SL, item 3) as
+  extras below the execution core, because deleting it would undo working
+  functionality.
 
 CURRENT PROBLEM:
 none.
 
 NEXT ACTION:
-1 feature item 3 — TP/SL populate: relax the frontendOpenOrders weight-20 budget
-  gate in WhaleEngine._enrich for a forced enrich (available > 60 when force,
-  keep > 200 routine) so PositionContext.orders_known becomes True
-2 feature item 5 — liquidation alert: new EventType + ValueKind.LIQUIDATION_VALUE
-  + THRESHOLD_CLASS/HEADERS/DETECTOR_OF_EVENT entries + detector.from_liquidation
-  + emit from WhaleEngine._process_liquidation + a dedup.identity_key branch
-3 feature item 6 — startup line distinguishing durable Postgres from the
-  ephemeral SQLite fallback
-4 remaining docs: ARCHITECTURE/SECURITY notes on command scopes, README margin gate
-User-owned: rotate BOT_TOKEN via @BotFather /revoke, update the Railway variable.
+1 config.py + settings_service.py: enable_order_alerts (default False)
+2 filters.py: REASON_ORDER_ALERTS_OFF
+3 detector.from_fill + engine _on_user_message ordinary-fill branch
+4 alert_service labels (WHALE TRADE / Executed / VERIFIED EXECUTION / footer
+  CLEXER WHALE MONITOR), split counters, /recent + /whales execution filter
+5 the 26 §31 regression tests + §32 integration + §33 scenario
 
 RELEVANT TEST:
-./.venv/Scripts/python.exe -m pytest -q     -> 474 passed, 0 failed, 0 skipped
+./.venv/Scripts/python.exe -m pytest -q     -> 524 passed (baseline, pre-change)

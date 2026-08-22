@@ -264,9 +264,11 @@ async def test_a_raw_trades_frame_becomes_one_formatted_whale_alert(wire):
     assert text.endswith("🐋 Whale Monitor")
     assert text.count(DIVIDER) == 3
 
-    # Coin, direction and the value the threshold was applied to.
+    # Coin, direction and the value the threshold was applied to. The side is
+    # the *executed* side; the position it belongs to is reported separately.
     assert "🪙 <b>BTC</b>" in text
-    assert "📈 LONG" in text
+    assert "🟢 BUY" in text
+    assert "📈 LONG" not in text
     assert "💱 <b>Trade:</b> $5,000,000" in text        # executed trade value
 
     # Everything below came from clearinghouseState / frontendOpenOrders.
@@ -297,7 +299,7 @@ async def test_the_alert_is_backed_by_exactly_one_persisted_event(wire, database
         assert event.event_type == EventType.WHALE_TRADE.value
         assert event.value_kind == ValueKind.TRADE_VALUE.value
         assert event.coin == "BTC"
-        assert event.side == "LONG"
+        assert event.side == "BUY"                       # the executed side
         assert event.wallet == WALLET_A.lower()          # stored lower-cased
         assert event.notional == pytest.approx(5_000_000.0)
         assert event.price == pytest.approx(BTC_PX)
@@ -332,7 +334,8 @@ async def test_both_participants_are_tracked_but_only_the_taker_is_alerted(wire,
         assert await WalletRepository.get(session, WALLET_B) is None
 
 
-async def test_a_sell_aggressor_on_a_short_renders_as_a_short(wire):
+async def test_a_sell_aggressor_on_a_short_renders_as_a_sell(wire):
+    """The execution is a SELL. That the wallet is short is separate information."""
     short = json.loads(json.dumps(BTC_LONG))
     short["assetPositions"][0]["position"]["szi"] = "-60.0"
     short["assetPositions"][0]["position"]["liquidationPx"] = "121000.0"
@@ -341,7 +344,8 @@ async def test_a_sell_aggressor_on_a_short_renders_as_a_short(wire):
 
     assert len(stack.bot.messages) == 1
     text = stack.texts[0]
-    assert "📉 SHORT" in text
+    assert "🔴 SELL" in text
+    assert "📉 SHORT" not in text
     assert "📈 LONG" not in text
     # ``side: "A"`` means the seller was the aggressor: users[1].
     assert f"<code>{WALLET_A}</code>" in text

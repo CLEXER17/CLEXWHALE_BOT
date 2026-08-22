@@ -79,7 +79,13 @@ class Settings(BaseSettings):
     # ── Detector toggles ───────────────────────────────────────
     enable_trade_detector: bool = True
     enable_position_detector: bool = True
+    #: Internal order *tracking*, not order alerting. Resting orders are how
+    #: TP/SL are discovered and how a fill is attributed to an order, so this
+    #: stays on by default and is deliberately separate from the switch below.
     enable_order_detector: bool = True
+    #: User-facing order alerts (placed / modified / cancelled / resting). Off by
+    #: default: an order is an intention, and the primary feed carries executions.
+    enable_order_alerts: bool = False
     enable_order_cancel_alerts: bool = True
     enable_wallet_tracking: bool = True
     enable_book_scanner: bool = False

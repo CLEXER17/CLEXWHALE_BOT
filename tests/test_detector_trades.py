@@ -81,22 +81,28 @@ def test_maker_side_is_the_opposite_of_the_taker_side():
     assert event.context["role"] == "maker"
 
 
-def test_long_position_context_reports_long():
-    """§4A — a whale LONG. The position side wins over the single trade side."""
+def test_a_trade_on_a_long_reports_the_executed_side_not_the_position_side():
+    """§10 — an execution is not a position.
+
+    The whale holds a 60 BTC long and buys 30 more. The trade alert reports the
+    *executed* side (``BUY``); the position it belongs to is reported separately,
+    so a $3M buy that trims a short can never be badged ``SHORT``.
+    """
     ctx = make_context(position=make_position(szi=60.0))
     event = detector().from_trade(make_trade(sz=30.0), context=ctx, min_notional=0)
     assert event is not None
-    assert event.side == "LONG"
+    assert event.side == "BUY"
+    assert event.value("trade_side") == "BUY"
     assert event.value("position_side") == "LONG"
     assert event.value("position_size") == 60.0
 
 
-def test_short_position_context_reports_short():
-    """§4B — a whale SHORT."""
+def test_a_sell_on_a_short_still_reports_sell_not_short():
+    """§2 — ``SELL EXECUTION ≠ automatically SHORT``."""
     ctx = make_context(position=make_position(szi=-60.0))
     event = detector().from_trade(make_trade(side="A", sz=30.0), context=ctx, min_notional=0)
     assert event is not None
-    assert event.side == "SHORT"
+    assert event.side == "SELL"
     assert event.value("position_side") == "SHORT"
 
 

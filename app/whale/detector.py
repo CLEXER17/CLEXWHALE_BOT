@@ -302,6 +302,11 @@ class WhaleDetector:
 
         ``wallet`` selects which participant the event is about; it defaults to
         the taker, whose side is the one Hyperliquid states explicitly.
+
+        :attr:`WhaleEvent.side` is the *executed* side — ``BUY`` or ``SELL``. A
+        verified position snapshot, when one is attached, is reported separately
+        as ``position_side``: an execution is not a position, and a $3M BUY that
+        trims a short must not be badged ``SHORT`` in a trade alert.
         """
         notional = trade.notional
         if notional < min_notional:
@@ -319,14 +324,13 @@ class WhaleDetector:
         else:
             trade_side = trade.taker_side
 
-        position_side = ctx.position.side if ctx.position else None
         event = WhaleEvent(
             event_type=EventType.WHALE_TRADE,
             coin=trade.coin,
             notional=notional,
             value_kind=ValueKind.TRADE_VALUE,
             event_time=trade.time or utc_now(),
-            side=position_side or trade_side,
+            side=trade_side,
             wallet=subject,
             detection="Large market trade" if is_taker else "Large resting order filled",
             context={
@@ -343,6 +347,109 @@ class WhaleDetector:
         event.set("taker_side", DataPoint.confirmed(trade.taker_side))
         self._attach_position(event, ctx)
         self._attach_market(event, trade.px)
+        return event
+
+    # ── 1b. verified executions from a wallet's own fills feed ─
+    def from_fill(
+        self,
+        wallet: str,
+        fill: Fill,
+        *,
+        context: PositionContext | None = None,
+        min_notional: float = 0.0,
+        filled_size: float | None = None,
+        order_size: float | None = None,
+    ) -> WhaleEvent | None:
+        """A verified execution reported on a wallet's ``userEvents`` fills feed.
+
+        This is the second source of ``WHALE_TRADE`` and the one anchored to an
+        order: a fill carries ``oid`` (the order that executed) and ``tid`` (the
+        execution itself), which is exactly the identity the deduplicator wants.
+        The public ``trades`` feed reports the same executions market-wide but
+        without an order id, so the two feeds overlap for focus wallets and the
+        shared ``("trade", tid, role)`` identity collapses them into one alert.
+
+        Three rules hold here, all of them the order/position separation:
+
+        * A fill *is* an execution. A resting order that has not filled produces
+          nothing in this method — orders arrive on ``orderUpdates`` instead.
+        * :attr:`WhaleEvent.side` is the executed side, ``BUY`` or ``SELL``, and
+          is never translated into ``LONG``/``SHORT``. Hyperliquid's own
+          description of what the fill did to the position (``dir``) is reported
+          verbatim as a separate, clearly-labelled field.
+        * The threshold is applied to *this* execution's notional. Partial fills
+          are separate executions and are never summed into one alert, because
+          summing them would announce a trade of a size that never happened. The
+          cumulative progress of the order is reported alongside instead.
+        """
+        if fill.is_liquidation:
+            # Forced closes are not discretionary trades; from_liquidation owns
+            # them, and routing one here would announce it as a whale's decision.
+            return None
+        notional = fill.notional
+        if notional < min_notional:
+            return None
+
+        ctx = context or PositionContext()
+        trade_side = side_label(fill.side)
+        crossed = bool(fill.crossed)
+        event = WhaleEvent(
+            event_type=EventType.WHALE_TRADE,
+            coin=fill.coin,
+            notional=notional,
+            value_kind=ValueKind.TRADE_VALUE,
+            event_time=fill.time or utc_now(),
+            side=trade_side,
+            wallet=(wallet or "").lower() or None,
+            detection="Large market trade" if crossed else "Large resting order filled",
+            order_id=fill.oid,
+            context={
+                "tid": fill.tid,
+                "hash": fill.hash,
+                "oid": fill.oid,
+                "source": "ws:userEvents:fills",
+                "role": "taker" if crossed else "maker",
+                "dir": fill.dir,
+            },
+        )
+        event.set("price", DataPoint.confirmed(fill.px, "execution price"))
+        event.set("size", DataPoint.confirmed(abs(fill.sz)))
+        event.set("trade_side", DataPoint.confirmed(trade_side))
+        event.set(
+            "execution_dir",
+            DataPoint.confirmed(str(fill.dir), "direction Hyperliquid reported for this fill")
+            if fill.dir
+            else DataPoint.unavailable("not reported on this fill"),
+        )
+        event.set(
+            "fee",
+            DataPoint.confirmed(fill.fee)
+            if fill.fee is not None
+            else DataPoint.unavailable("not reported on this fill"),
+        )
+        # ``closedPnl`` is this wallet's realised result on this fill. It is 0 for
+        # a fill that only opens or adds, so it is reported only when the exchange
+        # actually settled something.
+        if fill.closed_pnl is not None and abs(fill.closed_pnl) > 0:
+            event.set(
+                "realized_pnl",
+                DataPoint.confirmed(fill.closed_pnl, "closedPnl on this fill"),
+            )
+        if filled_size is not None:
+            event.set(
+                "order_filled_size",
+                DataPoint.confirmed(abs(filled_size), "cumulative verified fills of this order"),
+            )
+            if order_size and abs(order_size) > DUST:
+                event.set(
+                    "order_fill_pct",
+                    DataPoint.confirmed(
+                        100.0 * abs(filled_size) / abs(order_size),
+                        "share of the original order size that has executed",
+                    ),
+                )
+        self._attach_position(event, ctx)
+        self._attach_market(event, fill.px)
         return event
 
     # ── 2. forced liquidation ─────────────────────────────────

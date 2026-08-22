@@ -72,6 +72,16 @@ ORDER_EVENTS = frozenset(
 )
 CANCEL_EVENTS = frozenset({EventType.ORDER_CANCELLED})
 
+#: Events that describe a trade that **actually happened**. This is the only set
+#: allowed to reach the primary whale feed, and it is what ``/recent`` and
+#: ``/whales`` count. A resting, modified or cancelled order is an *intention*
+#: and never appears here.
+EXECUTION_EVENTS = frozenset({EventType.WHALE_TRADE, EventType.WHALE_LIQUIDATED})
+
+#: Coarse grouping used by the engine counters, the diagnostics panel and the
+#: history commands, so "trades observed" can never be inflated by order events.
+EVENT_CATEGORIES = ("execution", "position", "order", "book")
+
 
 class ValueKind(str, Enum):
     TRADE_VALUE = "TRADE_VALUE"
@@ -174,6 +184,22 @@ class WhaleEvent:
     @property
     def is_order_event(self) -> bool:
         return self.event_type in ORDER_EVENTS
+
+    @property
+    def is_execution(self) -> bool:
+        """True when this event reports a trade that actually executed."""
+        return self.event_type in EXECUTION_EVENTS
+
+    @property
+    def category(self) -> str:
+        """One of :data:`EVENT_CATEGORIES`. Keeps the counters honest."""
+        if self.event_type in EXECUTION_EVENTS:
+            return "execution"
+        if self.event_type in POSITION_EVENTS:
+            return "position"
+        if self.event_type in ORDER_EVENTS:
+            return "order"
+        return "book"
 
     @property
     def threshold_class(self) -> str:

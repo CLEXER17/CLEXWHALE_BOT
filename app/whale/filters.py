@@ -43,6 +43,11 @@ REASON_OK = "accepted"
 REASON_MONITORING_OFF = "monitoring_disabled"
 REASON_COIN = "coin_not_tracked"
 REASON_DETECTOR = "detector_disabled"
+#: An order event was tracked internally but not published. This is the reason
+#: the primary feed stays clean by default, and it is counted separately from
+#: ``detector_disabled`` so diagnostics can say "tracked, not alerted" rather
+#: than implying order monitoring is off.
+REASON_ORDER_ALERTS_OFF = "order_alerts_disabled"
 REASON_CANCELS_OFF = "cancel_alerts_disabled"
 REASON_THRESHOLD = "below_threshold"
 REASON_MARGIN = "below_margin"
@@ -116,6 +121,13 @@ class WhaleFilter:
         detector = DETECTOR_OF_EVENT.get(event.event_type, "trade")
         if not cfg.detector_enabled(detector):
             return FilterResult(False, REASON_DETECTOR)
+
+        # An order is an intention, not a trade. Order tracking keeps running
+        # (it is where TP/SL and fill attribution come from); publishing is a
+        # separate, off-by-default decision, so the primary feed carries
+        # executions and position changes only.
+        if event.is_order_event and not cfg.enable_order_alerts:
+            return FilterResult(False, REASON_ORDER_ALERTS_OFF)
 
         if event.event_type in CANCEL_EVENTS and not cfg.enable_order_cancel_alerts:
             return FilterResult(False, REASON_CANCELS_OFF)

@@ -49,7 +49,12 @@ KEY_ALL_COINS = "all_coins"
 KEY_MAX_COINS = "max_monitored_coins"
 KEY_TRADES = "enable_trade_detector"
 KEY_POSITIONS = "enable_position_detector"
+#: Internal order *tracking*. Never gates the trade feed — see KEY_ORDER_ALERTS.
 KEY_ORDERS = "enable_order_detector"
+#: User-facing order alerts. Separate from KEY_ORDERS because a resting order is
+#: an intention, not a trade: the tracking must keep running (it is how TP/SL and
+#: fill attribution are discovered) while the alerts stay off.
+KEY_ORDER_ALERTS = "enable_order_alerts"
 KEY_CANCELS = "enable_order_cancel_alerts"
 KEY_WALLETS = "enable_wallet_tracking"
 KEY_BOOK = "enable_book_scanner"
@@ -64,6 +69,7 @@ BOOL_KEYS = frozenset(
         KEY_TRADES,
         KEY_POSITIONS,
         KEY_ORDERS,
+        KEY_ORDER_ALERTS,
         KEY_CANCELS,
         KEY_WALLETS,
         KEY_BOOK,
@@ -112,7 +118,13 @@ class RuntimeConfig:
 
     enable_trade_detector: bool = True
     enable_position_detector: bool = True
+    #: Internal order tracking. On by default and *not* an alert switch: resting
+    #: orders are the only source of TP/SL and the way a fill is attributed to an
+    #: order, so turning this off costs data, not noise.
     enable_order_detector: bool = True
+    #: User-facing order alerts (placed / modified / cancelled / resting). Off by
+    #: default so the primary feed carries executions only.
+    enable_order_alerts: bool = False
     enable_order_cancel_alerts: bool = True
     enable_wallet_tracking: bool = True
     enable_book_scanner: bool = False
@@ -240,6 +252,7 @@ class SettingsService:
             KEY_TRADES: env.enable_trade_detector,
             KEY_POSITIONS: env.enable_position_detector,
             KEY_ORDERS: env.enable_order_detector,
+            KEY_ORDER_ALERTS: env.enable_order_alerts,
             KEY_CANCELS: env.enable_order_cancel_alerts,
             KEY_WALLETS: env.enable_wallet_tracking,
             KEY_BOOK: env.enable_book_scanner,
@@ -324,6 +337,7 @@ class SettingsService:
             enable_trade_detector=as_bool(KEY_TRADES, True),
             enable_position_detector=as_bool(KEY_POSITIONS, True),
             enable_order_detector=as_bool(KEY_ORDERS, True),
+            enable_order_alerts=as_bool(KEY_ORDER_ALERTS, False),
             enable_order_cancel_alerts=as_bool(KEY_CANCELS, True),
             enable_wallet_tracking=as_bool(KEY_WALLETS, True),
             enable_book_scanner=as_bool(KEY_BOOK, False),

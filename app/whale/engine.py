@@ -45,7 +45,7 @@ from app.database.repository import (
 )
 from app.hyperliquid import parser
 from app.hyperliquid.constants import MAX_WS_CONNECTIONS
-from app.hyperliquid.models import AccountState, L2Book, OpenOrder, OrderUpdate, Trade
+from app.hyperliquid.models import AccountState, Fill, L2Book, OpenOrder, OrderUpdate, Trade
 from app.hyperliquid.rest import HyperliquidREST
 from app.hyperliquid.websocket import HyperliquidWebSocket
 from app.services.settings_service import RuntimeConfig, SettingsService
@@ -53,7 +53,7 @@ from app.utils.formatting import DataPoint, utc_now
 from app.utils.logging import get_logger
 from app.whale.dedup import IDENTITY_TTL, Deduplicator
 from app.whale.detector import OrderState, WhaleDetector
-from app.whale.events import EventType, WhaleEvent
+from app.whale.events import EVENT_CATEGORIES, EventType, WhaleEvent
 from app.whale.filters import WhaleFilter
 from app.whale.lifecycle import POSITION_SIDES, may_modify_position
 from app.whale.tracker import WalletTracker, order_state_from_open_order
@@ -80,6 +80,9 @@ MAX_FOCUS_WALLETS = min(WS_UNIQUE_USER_HARD_CAP, MAX_WS_CONNECTIONS - 2)
 
 #: Cap on the pending realised-PnL map (wallet+coin → summed ``closedPnl``).
 REALIZED_PNL_MAX = 500
+
+#: Cap on the per-order fill-progress map (wallet+oid → verified size filled).
+ORDER_FILL_MAX = 1000
 
 #: Weight that must be left in the sliding window before an *opportunistic*
 #: ``frontendOpenOrders`` (weight 20) is worth spending. Routine polling keeps a
@@ -136,6 +139,10 @@ class WhaleEngine:
         #: (wallet, coin) → summed ``closedPnl`` awaiting the next close. Only
         #: the per-user fills feed populates this, so it covers the focus slate.
         self._realized_pnl: dict[tuple[str, str], float] = {}
+        #: (wallet, oid) → verified size filled so far. Partial fills are separate
+        #: executions and are alerted separately; this only reports how far the
+        #: order has got, and is never summed into an alert's notional.
+        self._order_fills: dict[tuple[str, int], float] = {}
         self._universe: tuple[str, ...] = ()
         self._known_coins: set[str] = set()
         self._volumes: dict[str, float] = {}
@@ -158,9 +165,21 @@ class WhaleEngine:
 
         # counters
         self.trades_seen = 0
+        #: Executions observed on a focus wallet's own fills feed.
+        self.fills_seen = 0
+        #: Order-lifecycle frames observed. Counted even when order alerts are
+        #: off, because the tracking still runs — that is the point of §25.
+        self.orders_seen = 0
         self.candidates = 0
+        #: Executions that became verified whale-trade events.
+        self.executions_verified = 0
         self.events_detected = 0
         self.events_alerted = 0
+        #: Per-category tallies (execution / position / order / book), so a feed
+        #: full of order traffic can never be reported as trades.
+        self.detected_by_category: dict[str, int] = {k: 0 for k in EVENT_CATEGORIES}
+        self.alerted_by_category: dict[str, int] = {k: 0 for k in EVENT_CATEGORIES}
+        self.duplicates_by_category: dict[str, int] = {k: 0 for k in EVENT_CATEGORIES}
         self.queue_dropped = 0
         self.persist_errors = 0
         #: Events the durable gate caught that the in-memory cache had forgotten.
@@ -342,16 +361,50 @@ class WhaleEngine:
     async def _on_user_message(self, wallet: str, channel: str, data: Any) -> None:
         if channel == "orderUpdates":
             for update in parser.parse_order_updates(data):
+                self.orders_seen += 1
                 self._offer(_Job("order_update", update, wallet=wallet))
             return
         if channel == "userEvents" and isinstance(data, dict):
-            # Liquidation detail is only exposed per user; surface it as a fill.
-            fills = parser.parse_fills(data.get("fills"))
-            for fill in fills:
+            # A wallet's own fills feed carries two different facts: ordinary
+            # executions — trades that actually happened, which is what the
+            # primary feed is for — and forced liquidations, whose detail is
+            # exposed nowhere else. A resting order is not here, by construction.
+            cfg = self.config
+            for fill in parser.parse_fills(data.get("fills")):
+                self.fills_seen += 1
                 self._record_realized_pnl(wallet, fill)
+                filled = self._note_order_fill(wallet, fill)
                 if fill.is_liquidation:
                     self._offer(_Job("liquidation", fill, wallet=wallet))
+                    continue
+                if not cfg.monitoring_active or not cfg.enable_trade_detector:
+                    continue
+                if not cfg.coin_enabled(fill.coin):
+                    continue
+                # The threshold is applied to this execution's own notional: a
+                # partial fill is a real trade of exactly that size, and summing
+                # partials would announce a trade that never happened.
+                if fill.notional < cfg.threshold_for("trade"):
+                    continue
+                self.candidates += 1
+                self._offer(_Job("fill", (fill, filled), wallet=wallet))
             return
+
+    def _note_order_fill(self, wallet: str, fill: Fill) -> float | None:
+        """Accumulate how much of one order has verifiably executed.
+
+        Returns the cumulative filled size including this fill, or ``None`` when
+        the fill carries no order id. Used for reporting progress only — never to
+        build an alert's notional (see :meth:`app.whale.detector.WhaleDetector.from_fill`).
+        """
+        if not wallet or fill.oid is None:
+            return None
+        key = (wallet.lower(), int(fill.oid))
+        total = self._order_fills.get(key, 0.0) + abs(fill.sz)
+        self._order_fills[key] = total
+        while len(self._order_fills) > ORDER_FILL_MAX:
+            self._order_fills.pop(next(iter(self._order_fills)))
+        return total
 
     def _record_realized_pnl(self, wallet: str, fill: Any) -> None:
         """Accumulate Hyperliquid's own ``closedPnl`` for one wallet+coin.
@@ -438,6 +491,9 @@ class WhaleEngine:
             await self._process_book(job.payload)
         elif job.kind == "liquidation":
             await self._process_liquidation(job.wallet or "", job.payload)
+        elif job.kind == "fill":
+            fill, filled = job.payload
+            await self._process_fill(job.wallet or "", fill, filled)
 
     async def _process_trade(self, trade: Trade) -> None:
         wallet = trade.taker or trade.buyer or trade.seller
@@ -478,6 +534,38 @@ class WhaleEngine:
         if not cfg.enable_book_scanner:
             return
         for event in self.detector.from_book(book, min_notional=cfg.threshold_for("order")):
+            await self._emit(event)
+
+    async def _process_fill(
+        self, wallet: str, fill: Fill, filled_size: float | None = None
+    ) -> None:
+        """A verified execution on a focus wallet's own fills feed.
+
+        This is the strongest evidence the API offers that a trade happened: the
+        exchange reported the fill, with its own execution id (``tid``) and the
+        order it belonged to (``oid``). The public trades feed carries the same
+        executions with the same ``tid``, so the deduplicator collapses the two
+        deliveries into one alert rather than announcing the trade twice.
+        """
+        # An alert is about to be rendered from this, so spend the weight that
+        # populates the position snapshot and the TP/SL trigger orders.
+        await self._enrich(wallet, fill.coin, for_alert=True)
+        context = self.tracker.context_for(wallet, fill.coin)
+        order_size: float | None = None
+        if fill.oid is not None:
+            tracked = self.tracker.get(wallet)
+            state = tracked.orders.get(int(fill.oid)) if tracked else None
+            if state is not None and state.orig_size:
+                order_size = abs(state.orig_size)
+        event = self.detector.from_fill(
+            wallet,
+            fill,
+            context=context,
+            min_notional=self.config.threshold_for("trade"),
+            filled_size=filled_size,
+            order_size=order_size,
+        )
+        if event is not None:
             await self._emit(event)
 
     async def _process_liquidation(self, wallet: str, fill: Any) -> None:
@@ -629,16 +717,26 @@ class WhaleEngine:
 
     # ── pipeline ──────────────────────────────────────────────
     async def _emit(self, event: WhaleEvent) -> None:
+        category = event.category
         self.events_detected += 1
+        self.detected_by_category[category] = self.detected_by_category.get(category, 0) + 1
+        if event.is_execution:
+            self.executions_verified += 1
         self.last_event_at = utc_now()
 
         decision = self.filter.evaluate(event)
         if not decision.accepted:
             return
         if not self.dedup.check(event, self.config.alert_cooldown_seconds):
+            self.duplicates_by_category[category] = (
+                self.duplicates_by_category.get(category, 0) + 1
+            )
             return
         if await self._already_recorded(event):
             self.duplicate_persisted += 1
+            self.duplicates_by_category[category] = (
+                self.duplicates_by_category.get(category, 0) + 1
+            )
             return
 
         event_id = await self._persist(event)
@@ -649,6 +747,7 @@ class WhaleEngine:
 
         self.tracker.record_alert(event.wallet)
         self.events_alerted += 1
+        self.alerted_by_category[category] = self.alerted_by_category.get(category, 0) + 1
         self.last_alert_at = utc_now()
 
         if self.alert_callback is not None:
@@ -999,9 +1098,15 @@ class WhaleEngine:
             "coins_monitored": list(self._universe),
             "coins_not_monitored": len(self._dropped_coins),
             "trades_seen": self.trades_seen,
+            "fills_seen": self.fills_seen,
+            "orders_seen": self.orders_seen,
             "candidates": self.candidates,
+            "executions_verified": self.executions_verified,
             "events_detected": self.events_detected,
             "events_alerted": self.events_alerted,
+            "detected_by_category": dict(self.detected_by_category),
+            "alerted_by_category": dict(self.alerted_by_category),
+            "duplicates_by_category": dict(self.duplicates_by_category),
             "queue_depth": self._queue.qsize(),
             "queue_dropped": self.queue_dropped,
             "persist_errors": self.persist_errors,

@@ -17,6 +17,7 @@ from app.whale.filters import (
     REASON_MARGIN_UNKNOWN,
     REASON_MONITORING_OFF,
     REASON_OK,
+    REASON_ORDER_ALERTS_OFF,
     REASON_THRESHOLD,
     WhaleFilter,
 )
@@ -190,11 +191,45 @@ def test_disabled_detector_rejects_its_own_events_only():
 
 
 def test_cancel_alerts_can_be_turned_off_without_disabling_orders():
-    cfg = config(enable_order_detector=True, enable_order_cancel_alerts=False)
+    cfg = config(
+        enable_order_detector=True,
+        enable_order_alerts=True,
+        enable_order_cancel_alerts=False,
+    )
     cancel = event(event_type=EventType.ORDER_CANCELLED, value_kind=ValueKind.ORDER_NOTIONAL)
     placed = event(event_type=EventType.ORDER_PLACED, value_kind=ValueKind.ORDER_NOTIONAL)
     assert make_filter().evaluate(cancel, cfg).reason == REASON_CANCELS_OFF
     assert make_filter().evaluate(placed, cfg).accepted is True
+
+
+def test_order_alerts_are_off_by_default_while_tracking_stays_on():
+    """An order is an intention; the primary feed carries executions.
+
+    The distinction matters for diagnostics: the rejection reason must say the
+    order was *tracked but not alerted*, not that order monitoring is off — the
+    tracking is what discovers TP/SL and attributes a fill to an order.
+    """
+    cfg = config()
+    assert cfg.enable_order_detector is True
+    assert cfg.enable_order_alerts is False
+    placed = event(event_type=EventType.ORDER_PLACED, value_kind=ValueKind.ORDER_NOTIONAL)
+    result = make_filter().evaluate(placed, cfg)
+    assert result.accepted is False
+    assert result.reason == REASON_ORDER_ALERTS_OFF
+    assert result.reason != REASON_DETECTOR
+
+
+def test_executions_and_positions_are_unaffected_by_the_order_alert_switch():
+    """Turning the feed quiet must not silence the trades it exists for."""
+    cfg = config()
+    trade = event(notional=3_000_000)
+    position = event(
+        event_type=EventType.POSITION_OPENED,
+        value_kind=ValueKind.POSITION_NOTIONAL,
+        notional=3_000_000,
+    )
+    assert make_filter().evaluate(trade, cfg).accepted is True
+    assert make_filter().evaluate(position, cfg).accepted is True
 
 
 def test_book_scanner_is_off_by_default():
@@ -253,7 +288,9 @@ def test_unknown_margin_is_rejected_with_its_own_reason():
 
 def test_resting_orders_and_book_levels_are_exempt_from_the_margin_gate():
     """No collateral is committed until a fill, so gating these is meaningless."""
-    cfg = config(min_margin_value=5_000_000, enable_book_scanner=True)
+    cfg = config(
+        min_margin_value=5_000_000, enable_book_scanner=True, enable_order_alerts=True
+    )
     order = event(
         event_type=EventType.ORDER_PLACED,
         value_kind=ValueKind.ORDER_NOTIONAL,
